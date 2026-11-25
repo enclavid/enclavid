@@ -11,7 +11,7 @@ use fleet_stream::bin;
 
 use crate::{
     AuthorizeError, AuthorizeRequest, BlobRequest, KbsError, KbsRequest, KbsResponse, Manifest,
-    ManifestRequest, PullError, Verdict,
+    ManifestRequest, PullError, Verdict, WebhookAnswer, WebhookError, WebhookRequest,
 };
 
 /// What api asks of the hatch. The hatch serves one of these per api
@@ -37,4 +37,7 @@ pub trait RemoteHatch {
 
     /// One leg of a key broker's handshake.
     async fn kbs(&self, req: KbsRequest) -> Result<KbsResponse, KbsError>;
+
+    /// One attempt at a webhook: whether to try again is the caller's.
+    async fn webhook(&self, req: WebhookRequest) -> Result<WebhookAnswer, WebhookError>;
 }

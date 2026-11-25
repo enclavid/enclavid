@@ -15,9 +15,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use enclavid_hatch::boundary::AnyCaller;
+use enclavid_hatch::egress;
 use enclavid_hatch::hooks::Hooks;
 use enclavid_hatch::oci::{DEFAULT_CONCURRENT_BLOBS, DEFAULT_CONCURRENT_MANIFESTS, Pulls};
 use enclavid_hatch::service::Hatch;
+use enclavid_hatch::webhook::{self, DEFAULT_WEBHOOK_CONNECT, DEFAULT_WEBHOOK_SEND};
 use fleet_transport::LegFailure;
 use fleet_transport::launch::{LaunchError, Settings};
 use hatch_rpc::LegSettings;
@@ -189,6 +191,8 @@ async fn main() {
     let authorize_hook = hook(&mut launch, "authorize-hook-port");
     let limits_hook = hook(&mut launch, "limits-hook-port");
     let hook_deadline = secs(&mut launch, "hook-deadline-secs", DEFAULT_HOOK_DEADLINE);
+    let webhook_connect = secs(&mut launch, "webhook-connect-secs", DEFAULT_WEBHOOK_CONNECT);
+    let webhook_send = secs(&mut launch, "webhook-send-secs", DEFAULT_WEBHOOK_SEND);
     let request_buffer: usize = setting(&mut launch, "request-buffer", DEFAULT_REQUEST_BUFFER);
     let leg_default = LegSettings::default();
     let leg = LegSettings {
@@ -203,18 +207,21 @@ async fn main() {
         fleet_transport::DEFAULT_ACCEPT_RETRY,
     );
     launch.finish().unwrap_or_else(|e| refused(e));
-    // No turn at a registry, a hook with no time to answer, a service with no
-    // request buffer and a listener that retries at once are all a hatch that
-    // serves nothing.
+    // No turn at a registry, a hook or a webhook with no time to answer, a
+    // service with no request buffer and a listener that retries at once are
+    // all a hatch that serves nothing.
     if manifests == 0
         || blobs == 0
         || hook_deadline.is_zero()
+        || webhook_connect.is_zero()
+        || webhook_send.is_zero()
         || request_buffer == 0
         || accept_retry.is_zero()
     {
         safe_logger::error_and_panic!(
-            "hatch-cvm: the concurrent manifests and blobs, the hook deadline, the request \
-             buffer and the accept retry must be above zero. Stopping.",
+            "hatch-cvm: the concurrent manifests and blobs, the hook deadline, the webhook \
+             connect and send times, the request buffer and the accept retry must be above \
+             zero. Stopping.",
             reason!("a constant naming configuration keys the host itself supplied")
         );
     }
@@ -241,17 +248,35 @@ async fn main() {
         });
     }
 
-    let kbs = enclavid_hatch::kbs::client().unwrap_or_else(|e| {
+    // The hosts a registry's pull, a broker's leg and a webhook go to, judged
+    // by one check and looked up by one resolver.
+    let hosts = egress::Hosts::new(egress::PUBLIC_ONLY).unwrap_or_else(|e| {
+        debug!("{e}");
+        safe_logger::error_and_panic!(
+            "hatch-cvm: cannot build the resolver. Stopping.",
+            reason!("a constant")
+        )
+    });
+    let kbs = enclavid_hatch::kbs::client(hosts.clone()).unwrap_or_else(|e| {
         debug!("{e}");
         safe_logger::error_and_panic!(
             "hatch-cvm: cannot build the key broker client. Stopping.",
             reason!("a constant")
         )
     });
+    let webhooks =
+        webhook::client(hosts.clone(), webhook_connect, webhook_send).unwrap_or_else(|e| {
+            debug!("{e}");
+            safe_logger::error_and_panic!(
+                "hatch-cvm: cannot build the webhook client. Stopping.",
+                reason!("a constant")
+            )
+        });
     let hatch = Arc::new(Hatch {
         hooks: Hooks::new(authorize_hook.clone(), limits_hook.clone(), hook_deadline),
-        pulls: Pulls::new(manifests, blobs),
+        pulls: Pulls::new(manifests, blobs, hosts),
         kbs,
+        webhooks,
     });
 
     let listen = required("ENCLAVID_HATCH_LISTEN");
@@ -269,8 +294,9 @@ async fn main() {
     let named = |hook: &Option<String>| hook.clone().unwrap_or_else(|| "off".into());
     info!(
         "hatch-cvm: listening on {}, authorize hook {}, limits hook {}, hook deadline {:?}, \
-         {} manifests and {} blobs at once, request buffer={}, leg_timeout={:?}, \
-         leg_max_ports={}, leg_chunk={} bytes, leg_receive={} bytes, accept_retry={:?}",
+         webhook connect {:?} and send {:?}, {} manifests and {} blobs at once, request \
+         buffer={}, leg_timeout={:?}, leg_max_ports={}, leg_chunk={} bytes, leg_receive={} \
+         bytes, accept_retry={:?}",
         safe(&listen, reason!("on the measured command line")),
         safe(
             &named(&authorize_hook),
@@ -282,6 +308,14 @@ async fn main() {
         ),
         safe(
             &hook_deadline,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &webhook_connect,
+            reason!("the host's own setting, or this build's default")
+        ),
+        safe(
+            &webhook_send,
             reason!("the host's own setting, or this build's default")
         ),
         safe(

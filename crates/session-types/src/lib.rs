@@ -65,7 +65,8 @@ pub enum SessionStatus {
     Unspecified = 0,
     /// Session created and ready; multiple /connect + /input rounds here.
     Running = 1,
-    /// Policy returned a domain Status — webhook fired, data may be ready.
+    /// The policy gave its decision: its disclosures may be pulled, and the
+    /// consumer's webhook goes out.
     Completed = 2,
     /// The session could not be prepared to run, and asking again will not
     /// change that — see [`SessionMetadata::init_error`]. Terminal.
@@ -524,13 +525,17 @@ pub struct Consumer {
     pub r#ref: String,
     pub registry_auth: std::collections::HashMap<String, Vec<u8>>,
     pub plugins: Vec<PluginPin>,
+    /// Where the consumer is told the session ended; `None` where it asked for
+    /// no webhook.
+    pub webhook: Option<Webhook>,
 }
 
 impl std::fmt::Debug for Consumer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // `registry_auth` values are per-host bearer tokens — print only the
         // hostnames (its keys), never the tokens. Everything else is non-secret
-        // (`plugins` carries `Key`, which redacts itself).
+        // (`plugins` carries `Key`, and `webhook` its secret, each redacted by
+        // its own `Debug`).
         f.debug_struct("Consumer")
             .field("access", &self.access)
             .field("disclosure_pubkey", &self.disclosure_pubkey)
@@ -540,6 +545,35 @@ impl std::fmt::Debug for Consumer {
                 &self.registry_auth.keys().collect::<Vec<_>>(),
             )
             .field("plugins", &self.plugins)
+            .field("webhook", &self.webhook)
+            .finish()
+    }
+}
+
+/// A consumer's webhook for one session, as the creation gave it.
+#[derive(Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Webhook {
+    /// The `webhook-id` every attempt carries, minted at create: one id however
+    /// many times the session's end is noted.
+    pub id: String,
+    /// The endpoint.
+    pub url: String,
+    /// The key the webhook is signed with: the bytes of the Standard Webhooks
+    /// secret the consumer gave.
+    #[serde(with = "serde_bytes")]
+    pub secret: Vec<u8>,
+    /// The X25519 key, as 64 hex digits, the session id is sealed to.
+    pub pubkey: String,
+}
+
+impl std::fmt::Debug for Webhook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Webhook")
+            .field("id", &self.id)
+            .field("url", &self.url)
+            .field("secret", &"[REDACTED]")
+            .field("pubkey", &self.pubkey)
             .finish()
     }
 }

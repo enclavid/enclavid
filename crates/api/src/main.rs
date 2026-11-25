@@ -27,6 +27,7 @@ mod storage;
 mod tee;
 mod transport;
 mod turns;
+mod webhooks;
 
 use std::sync::Arc;
 
@@ -194,6 +195,16 @@ async fn main() {
         )
         .await,
     );
+    // Webhooks: each session's notice sent through the hatch as it comes due.
+    tokio::spawn(
+        webhooks::Webhooks::new(
+            session_store.clone(),
+            hatch.clone(),
+            settings.webhooks.clone(),
+        )
+        .run(),
+    );
+
     let consumer_state = Arc::new(ConsumerState::new(
         hatch,
         session_store,

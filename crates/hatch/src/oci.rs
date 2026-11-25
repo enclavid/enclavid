@@ -22,6 +22,10 @@
 //! registry's redirects as reqwest does by default, which oci-client gives no way
 //! to change, so a registry that redirects to plain http on its own host and
 //! port has the bearer sent on in the clear.
+//!
+//! The registry is a host the hatch sends to as it sends to any
+//! ([`Hosts::check`]); where it redirects to, and the realm it names for a
+//! token, are past that check.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -38,6 +42,8 @@ use tokio::time::{Instant, timeout, timeout_at};
 use fleet_stream::bin;
 use hatch_rpc::{BlobRequest, Manifest, ManifestRequest, PullError};
 use safe_logger::debug;
+
+use crate::egress::{Hosts, NotReached};
 
 const MANIFEST_ACCEPTS: &[&str] = &[
     "application/vnd.oci.image.manifest.v1+json",
@@ -65,19 +71,38 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Between two reads from the registry.
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// The guest's turns at registries, shared by every pull.
+/// The guest's turns at registries, shared by every pull, and the registries it
+/// pulls from.
 #[derive(Clone)]
 pub struct Pulls {
     manifests: Arc<Semaphore>,
     blobs: Arc<Semaphore>,
+    hosts: Hosts,
 }
 
 impl Pulls {
-    pub fn new(manifests: usize, blobs: usize) -> Self {
+    pub fn new(manifests: usize, blobs: usize, hosts: Hosts) -> Self {
         Self {
             manifests: Arc::new(Semaphore::new(manifests)),
             blobs: Arc::new(Semaphore::new(blobs)),
+            hosts,
         }
+    }
+
+    /// Whether the hatch pulls from the registry `reference` names: one it does
+    /// not send to is refused, and one whose name had no answer is a pull to ask
+    /// again.
+    async fn reached(&self, reference: &Reference) -> Result<(), PullError> {
+        let registry = format!("https://{}/", reference.resolve_registry());
+        self.hosts
+            .check(&registry)
+            .await
+            .map_err(|refusal| match refusal {
+                NotReached::NotPublic => PullError::Refused,
+                NotReached::NoAnswer => {
+                    PullError::Failed("the registry's name had no answer".into())
+                }
+            })
     }
 
     /// The raw manifest a pinned reference names.
@@ -88,6 +113,7 @@ impl Pulls {
         let client = build_client(protocol)?;
 
         let manifest = timeout(MANIFEST_TIMEOUT, async {
+            self.reached(&reference).await?;
             let _turn = self.manifests.acquire().await.map_err(failed)?;
             let (manifest, _) = client
                 .pull_manifest_raw(&reference, &auth, MANIFEST_ACCEPTS)
@@ -120,6 +146,7 @@ impl Pulls {
 
         let end = Instant::now() + BLOB_TIMEOUT;
         let (turn, stream) = timeout_at(end, async {
+            self.reached(&reference).await?;
             let turn = self.blobs.clone().acquire_owned().await.map_err(failed)?;
             // The digest alone, never a descriptor: a descriptor's `urls` would
             // have the client fetch from wherever the manifest names. This
@@ -417,6 +444,34 @@ mod tests {
         let got: Vec<_> = pass_on(Box::pin(pieces), 8, end, ()).collect().await;
         assert_eq!(got.len(), 2);
         assert!(got[1].is_err());
+    }
+
+    /// Held to public addresses, a pull from a registry at any other address,
+    /// or at localhost, is refused before anything is asked of it: a manifest
+    /// and a blob alike.
+    #[tokio::test]
+    async fn a_registry_that_is_not_public_is_refused() {
+        let held = Pulls::new(1, 1, Hosts::new(true).unwrap());
+        let digest = format!("sha256:{}", "0".repeat(64));
+        for registry in ["127.0.0.1:5000", "http://10.0.0.5:5000", "localhost:5000"] {
+            let reference = format!("{registry}/repo@{digest}");
+            let manifest = held
+                .manifest(ManifestRequest {
+                    reference: reference.clone(),
+                    registry_auth: vec![],
+                })
+                .await;
+            assert!(matches!(manifest, Err(PullError::Refused)), "{registry}");
+            let blob = held
+                .blob(BlobRequest {
+                    reference,
+                    digest: digest.clone(),
+                    size: fleet_stream::StreamLen::new(1).unwrap(),
+                    registry_auth: vec![],
+                })
+                .await;
+            assert!(matches!(blob, Err(PullError::Refused)), "{registry}");
+        }
     }
 
     #[test]

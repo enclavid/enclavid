@@ -16,7 +16,7 @@ use enclavid_attestation::ReportData;
 use enclavid_boundary::{Covert, reason};
 use session_types::{
     Consumer, ConsumerAccess, Key, PluginPin, SessionMetadata, SessionQuote, SessionStatus,
-    is_wit_name,
+    Webhook, is_wit_name,
 };
 use storage_client::boundary::Storage;
 use storage_client::{MetadataOp, SetMetadata};
@@ -24,8 +24,8 @@ use storage_client::{MetadataOp, SetMetadata};
 use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::init;
 use crate::limits::{
-    MAX_CONSUMER_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN, SESSION_ID_RANDOM_BYTES,
-    SESSION_TOKEN_BYTES,
+    MAX_CONSUMER_REF_LEN, MAX_PLUGINS, MAX_REGISTRY_AUTH_LEN, MAX_WEBHOOK_URL_LEN,
+    SESSION_ID_RANDOM_BYTES, SESSION_TOKEN_BYTES, WEBHOOK_SECRET_BYTES,
 };
 use crate::policy_pull;
 use crate::props;
@@ -104,6 +104,80 @@ pub struct CreateSessionRequest {
     /// `POST /api/v1/sessions/{id}/warmup` on the session once it is created.
     #[serde(default)]
     pub warmup: bool,
+
+    /// The consumer's webhook, told when the session ends — its policy gave a
+    /// decision, or it could not be prepared to run. Omit for none.
+    #[serde(default)]
+    pub webhook: Option<WebhookSetup>,
+}
+
+/// A webhook as a creation gives it. Every field is required.
+#[derive(Deserialize)]
+pub struct WebhookSetup {
+    /// The endpoint: an `https://` URL; `http://` only in a build that is not
+    /// measured, and, in one that is, at a public address. Kept as the hatch
+    /// reads it — scheme in lowercase, host in ASCII — and at most
+    /// [`MAX_WEBHOOK_URL_LEN`] bytes so.
+    pub url: String,
+    /// The Standard Webhooks signing secret: `whsec_`, then its key in base64.
+    pub secret: String,
+    /// The X25519 public key, as 64 hex digits, that `sealed_session_id` is
+    /// sealed to. A pair of the webhook's own, not the disclosures', with the id
+    /// opened only once the signature checks: a forged webhook then gets nothing
+    /// opened.
+    pub pubkey: String,
+}
+
+/// The webhook `setup` asks for, as the session keeps it; a 400 where any part
+/// of it is not as [`WebhookSetup`] says.
+fn webhook(setup: WebhookSetup) -> Result<Webhook, StatusCode> {
+    let WebhookSetup {
+        url,
+        secret,
+        pubkey,
+    } = setup;
+    // Read as the hatch reads it, and refused where reading it took a guess: a
+    // slash too many, a backslash, a character a URL does not carry.
+    let guessed = std::cell::Cell::new(false);
+    let parsed = url::Url::options()
+        .syntax_violation_callback(Some(&|_| guessed.set(true)))
+        .parse(&url)
+        .ok()
+        .filter(|_| !guessed.get())
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    // The endpoint is reached from the hatch, where TLS ends: in the clear, the
+    // host would read what the webhook carries.
+    let scheme = match parsed.scheme() {
+        "https" => true,
+        "http" => !cfg!(feature = "sev-snp"),
+        _ => false,
+    };
+    let url = String::from(parsed);
+    // The measured hatch sends only to a public address: a URL that writes
+    // another, or names localhost, is refused here, where the consumer hears of
+    // it. A name that resolves to one only the hatch can tell.
+    if !scheme
+        || url.len() > MAX_WEBHOOK_URL_LEN
+        || !url.chars().all(|c| c.is_ascii_graphic())
+        || (cfg!(feature = "sev-snp") && !hatch_rpc::public_as_written(&url))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let secret = secret
+        .strip_prefix("whsec_")
+        .and_then(|key| Base64::decode_vec(key).ok())
+        .filter(|key| WEBHOOK_SECRET_BYTES.contains(&key.len()))
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    let pubkey = hex::decode(&pubkey)
+        .ok()
+        .filter(|key| key.len() == 32)
+        .ok_or(StatusCode::BAD_REQUEST)?;
+    Ok(Webhook {
+        id: generate_webhook_id(),
+        url,
+        secret,
+        pubkey: hex::encode(pubkey),
+    })
 }
 
 /// One plugin pin in the create-session request. Mirrors the sealed
@@ -259,6 +333,20 @@ fn pins(
         })
         .collect::<Result<_, StatusCode>>()?;
 
+    // The hatch reads a ref's scheme only as `http://` or `https://` in
+    // lowercase, once at its front: a ref written another way is one it cannot
+    // pull.
+    let schemed = |r: &str| {
+        let rest = r
+            .strip_prefix("http://")
+            .or_else(|| r.strip_prefix("https://"))
+            .unwrap_or(r);
+        !rest.contains("://")
+    };
+    if !schemed(&policy) || plugins.iter().any(|p| !schemed(&p.impl_ref)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
     // A registry written `http://` is reached in the clear, across the host's
     // network: a bearer for it would cross there too, readable by the host. So
     // plain HTTP is for anonymous pulls alone, and a bearer the consumer names
@@ -267,6 +355,19 @@ fn pins(
         r.starts_with("http://") && !policy_pull::bearer_for_ref(&registry_auth, r).is_empty()
     };
     if in_clear(&policy) || plugins.iter().any(|p| in_clear(&p.impl_ref)) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // The measured hatch pulls only from a public registry: one a ref names by
+    // another address, or as localhost, is refused here, where the consumer
+    // hears of it. A name that resolves to one only the hatch can tell.
+    let public = |r: &str| {
+        policy_pull::registry_hostname(r)
+            .is_some_and(|host| hatch_rpc::public_as_written(&format!("https://{host}/")))
+    };
+    if cfg!(feature = "sev-snp")
+        && !(public(&policy) && plugins.iter().all(|p| public(&p.impl_ref)))
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -397,6 +498,7 @@ async fn create(
     // Held to their size here, before persistence; whether they fit the type
     // the policy declares is read when the session is prepared.
     let props = props::encode(body.props.as_ref()).ok_or(StatusCode::BAD_REQUEST)?;
+    let webhook = body.webhook.map(webhook).transpose()?;
 
     let session_id = generate_session_id();
 
@@ -438,6 +540,7 @@ async fn create(
         r#ref: body.consumer_ref.unwrap_or_default(),
         registry_auth,
         plugins,
+        webhook,
     };
     let metadata = SessionMetadata {
         policy_ref: policy_ref.clone(),
@@ -537,6 +640,12 @@ fn generate_session_id() -> String {
     format!("ses_{}", hex::encode(bytes))
 }
 
+fn generate_webhook_id() -> String {
+    let mut bytes = [0u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    format!("msg_{}", hex::encode(bytes))
+}
+
 /// Mint a fresh 32-byte per-session bearer for consumer reads. Wrapped
 /// in `SecretBox` so the plaintext zeroizes on drop and never lands in
 /// debug logs.
@@ -609,6 +718,48 @@ mod tests {
         );
     }
 
+    /// In the measured build a ref names a public registry: the policy's and
+    /// each plugin's, by address or as localhost refused.
+    #[test]
+    fn a_registry_is_one_the_hatch_reaches() {
+        let plugin = |impl_ref: String| PluginRequest {
+            package: "vendor:plugin@0.1.0".into(),
+            impl_ref,
+            key: None,
+        };
+        let kept = |policy: String, plugins| pins(policy, plugins, BTreeMap::new(), None).is_ok();
+        for private in ["127.0.0.1:5000", "http://10.0.0.5:5000", "localhost:5000"] {
+            assert_eq!(
+                kept(pinned(private), vec![]),
+                !cfg!(feature = "sev-snp"),
+                "{private}"
+            );
+            assert_eq!(
+                kept(pinned("r.example"), vec![plugin(pinned(private))]),
+                !cfg!(feature = "sev-snp"),
+                "{private}"
+            );
+        }
+        assert!(kept(
+            pinned("r.example"),
+            vec![plugin(pinned("1.1.1.1:5000"))]
+        ));
+        assert!(kept("enclavid/policy@sha256:00".into(), vec![]));
+        // A scheme the hatch does not read, in any build.
+        for unread in [
+            "HTTP://r.example",
+            "Https://r.example",
+            "http://http://r.example",
+            "oci://r.example",
+        ] {
+            assert!(!kept(pinned(unread), vec![]), "{unread}");
+            assert!(
+                !kept(pinned("r.example"), vec![plugin(pinned(unread))]),
+                "{unread}"
+            );
+        }
+    }
+
     /// A broker's key names a broker reached over http(s); the measured build
     /// takes none.
     #[test]
@@ -633,6 +784,80 @@ mod tests {
                 "{reachable}"
             );
         }
+    }
+
+    /// A webhook is kept only whole: an https endpoint, a Standard Webhooks
+    /// secret, and a 32-byte key in hex.
+    #[test]
+    fn a_webhook_is_kept_only_whole() {
+        let setup = |url: &str, secret: &str, pubkey: &str| WebhookSetup {
+            url: url.into(),
+            secret: secret.into(),
+            pubkey: pubkey.into(),
+        };
+        let key = "ab".repeat(32);
+        let k = key.as_str();
+        let s = "whsec_MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw";
+        let kept = webhook(setup("https://hooks.example/enclavid?ref=1", s, k)).unwrap();
+        assert_eq!(kept.url, "https://hooks.example/enclavid?ref=1");
+        assert_eq!(kept.secret.len(), 24);
+        assert_eq!(kept.pubkey, key);
+        assert!(kept.id.starts_with("msg_") && kept.id.len() == 36);
+        assert_ne!(
+            kept.id,
+            webhook(setup("https://hooks.example", s, k)).unwrap().id
+        );
+        // Kept as the hatch reads it.
+        for (written, read) in [
+            ("HTTPS://Hooks.Example/x", "https://hooks.example/x"),
+            (
+                "https://bücher.example/x",
+                "https://xn--bcher-kva.example/x",
+            ),
+            ("https://hooks.example", "https://hooks.example/"),
+        ] {
+            assert_eq!(
+                webhook(setup(written, s, k)).unwrap().url,
+                read,
+                "{written}"
+            );
+        }
+
+        let not_hex = "zz".repeat(32);
+        let too_long = format!("https://hooks.example/{}", "a".repeat(MAX_WEBHOOK_URL_LEN));
+        for (url, secret, pubkey) in [
+            ("hooks.example/enclavid", s, k),
+            ("https://", s, k),
+            ("https:///path", s, k),
+            ("https:\\\\hooks.example/x", s, k),
+            ("https://hooks.example/a b", s, k),
+            ("https://hooks.ex\tample/x", s, k),
+            ("ftp://hooks.example", s, k),
+            (too_long.as_str(), s, k),
+            (
+                "https://hooks.example",
+                "MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw",
+                k,
+            ),
+            ("https://hooks.example", "whsec_c2hvcnQ=", k),
+            ("https://hooks.example", "whsec_!!!", k),
+            ("https://hooks.example", s, "ab"),
+            ("https://hooks.example", s, not_hex.as_str()),
+        ] {
+            assert_eq!(
+                webhook(setup(url, secret, pubkey)).err(),
+                Some(StatusCode::BAD_REQUEST),
+                "{url} {secret} {pubkey}"
+            );
+        }
+        assert_eq!(
+            webhook(setup("http://hooks.example", s, k)).is_ok(),
+            !cfg!(feature = "sev-snp")
+        );
+        assert_eq!(
+            webhook(setup("https://127.0.0.1/hook", s, k)).is_ok(),
+            !cfg!(feature = "sev-snp")
+        );
     }
 
     /// A term asked for past the fleet's ceiling is the ceiling.

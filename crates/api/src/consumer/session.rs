@@ -29,11 +29,7 @@ pub struct SessionView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub consumer_ref: Option<String>,
     /// Number of disclosure entries the engine has appended for this
-    /// session. Mirrors the same field in the future webhook payload
-    /// so consumer SDKs can deserialize both shapes with one struct.
-    /// Counter rather than bool to support delta-detection at the
-    /// webhook receiver (`new_count - last_seen_count` = how many new
-    /// disclosures arrived since the last poll/notification).
+    /// session.
     pub disclosures: u64,
     /// Unix seconds at session create time. Surfaced for ops /
     /// observability (age, latency); not a security signal.

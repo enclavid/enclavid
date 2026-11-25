@@ -239,6 +239,11 @@ what is under [Not yet](#not-yet) comes first.
   the applicant, and takes the selfie itself once the face holds still. Videos
   are recorded through prompts such as head turns and colour flashes, and a
   plugin checks each prompt again in the enclave.
+- **Webhooks** — a session that ends, with its policy's decision or unable to
+  run, sends its consumer one `session.ended` webhook, signed as Standard
+  Webhooks signs and retried for about a day. It carries the consumer's own ref
+  and the session id sealed to the consumer's key; the consumer reads what the
+  session came to itself.
 - **Tooling** — a command-line client for authoring and pushing policies and
   plugins and for creating and reading sessions, a TypeScript policy SDK with
   templates and `npm create enclavid` to start from one (`sdk/typescript`,
@@ -255,7 +260,6 @@ what is under [Not yet](#not-yet) comes first.
   key from a KBS.
 - **Consumer tooling** — a command that verifies the gateway's attestation, and
   consumer SDKs.
-- **Webhooks** — notifying the consumer of status changes and ready disclosures.
 - **Sharing media** through the consent flow — the plumbing exists; the share
   path does not yet.
 
@@ -272,8 +276,8 @@ what is under [Not yet](#not-yet) comes first.
 - **Published measurements** — builds in CI, with every release's measurements
   signed into a public transparency log.
 
-After that: document reading, document authenticity and face match, sanctions
-screening, and webhooks.
+After that: document reading, document authenticity and face match, and
+sanctions screening.
 
 ## License
 

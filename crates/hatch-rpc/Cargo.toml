@@ -33,3 +33,6 @@ enclavid-boundary = { path = "../boundary" }
 # contract as the hatch serves it there — and `#[calls]` on the doors, what
 # api's end must declare. Build-time only.
 enclavid-boundary-macros = { path = "../boundary-macros" }
+# A URL taken apart as reqwest takes it, so its host is judged as the hatch
+# reaches it.
+url = "2"

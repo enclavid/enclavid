@@ -25,7 +25,8 @@ use crate::contract::{
 };
 use crate::{
     AuthorizeError, AuthorizeRequest, BlobRequest, KbsError, KbsRequest, KbsResponse,
-    MAX_BLOB_BYTES, Manifest, ManifestRequest, PullError, Verdict,
+    MAX_BLOB_BYTES, Manifest, ManifestRequest, PullError, Verdict, WebhookAnswer, WebhookError,
+    WebhookRequest,
 };
 
 type Client = RemoteHatchClient<Ciborium>;
@@ -143,6 +144,18 @@ impl<B> HatchLeg<B> {
         req: Exposed<KbsRequest, (), B>,
     ) -> Result<Untrusted<KbsResponse, <B as Receives<KbsResponse>>::Open, B>, KbsError> {
         self.client.kbs(req.into_inner()).await.map(inbound::<B, _>)
+    }
+
+    /// One attempt at a webhook, and the endpoint's status.
+    pub async fn webhook(
+        &self,
+        req: Exposed<WebhookRequest, (), B>,
+    ) -> Result<Untrusted<WebhookAnswer, <B as Receives<WebhookAnswer>>::Open, B>, WebhookError>
+    {
+        self.client
+            .webhook(req.into_inner())
+            .await
+            .map(inbound::<B, _>)
     }
 }
 

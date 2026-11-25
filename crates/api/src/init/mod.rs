@@ -28,7 +28,7 @@ use engine_types::limits::MAX_PROPS_BYTES;
 use engine_types::props::PropsRefusal;
 use session_types::{InitError, Prepared, SessionMetadata, SessionStatus};
 use storage_client::boundary::Storage;
-use storage_client::{MetadataOp, SessionStore, SetMetadata};
+use storage_client::{MetadataOp, SessionStore, SetMetadata, WriteField};
 
 use crate::boundary::ExecutionWorker;
 use crate::compositions::{Composition, Compositions, max_cwasm_bytes};
@@ -308,8 +308,9 @@ pub fn answer(error: &InitError) -> StatusCode {
 
 /// Mark `session_id` as one that could not be prepared to run, with `error`:
 /// its `metadata`, as read at `version`, written back in one write under that
-/// version. A session that moved since — a round committed, or another request
-/// marked it first — is left as it is, and what moved it stands.
+/// version, with the session's notice where its consumer gave a webhook. A
+/// session that moved since — a round committed, or another request marked it
+/// first — is left as it is, and what moved it stands.
 pub async fn record(
     store: &SessionStore,
     session_id: &str,
@@ -327,9 +328,16 @@ pub async fn record(
              could not be prepared — which api decided before any policy code ran"
         ),
     ));
-    let written = match store.seal(session_id, &[&set_metadata]) {
+    let notice = crate::webhooks::notice(session_id, &metadata);
+    let mut fields: Vec<&dyn WriteField> = vec![&set_metadata];
+    fields.extend(notice.as_ref().map(|n| n as &dyn WriteField));
+    let written = match store.seal(session_id, &fields) {
         Ok(ops) => {
-            let ops = ops.vouch(reason!(Covert::Bounded, "a single fixed field"));
+            let ops = ops.vouch(reason!(
+                Covert::Bounded,
+                "a single fixed field, and the notice where the consumer gave a webhook: \
+                 whether it did is its own setup"
+            ));
             store.write(Some(version), ops).await
         }
         Err(e) => Err(e),

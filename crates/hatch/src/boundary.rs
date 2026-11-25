@@ -10,12 +10,16 @@
 //! What answers it is that this role holds nothing a caller could be handed
 //! that the host does not hold: no applicant data, no seal key, no cache. A
 //! request is made on what it carries — the credential, the bearer, the
-//! handshake — and on nothing of another's: a registry client made for each
-//! pull, and for broker legs one client that keeps no cookie and follows no
-//! redirect. What comes back is the hooks', the registry's or the broker's
-//! answer to it, or this role's refusal of it, which the host could have from
-//! its own network. What IS shared is a budget — the turns at registries, and
-//! the creations the limits hook counts for the operator — so a caller can make
+//! handshake, the webhook — and on nothing of another's: a registry client made
+//! for each pull, and for broker legs and webhooks a client each that keeps no
+//! cookie, follows no redirect and reaches public addresses alone
+//! ([`crate::egress`]). What those two keep between calls — open
+//! connections, TLS sessions, DNS answers — tells a later call no more than the
+//! host sees on its own network: which hosts were reached, and when. What comes
+//! back is the hooks', the registry's, the broker's or the endpoint's answer to
+//! it, or this role's refusal of it, which the host could have from its own
+//! network. What IS shared is a budget — the turns at registries, and the
+//! creations the limits hook counts for the operator — so a caller can make
 //! others wait or be refused: availability, which the host holds in any case.
 //!
 //! Not `AuthZ` on the way in: no resource here is one caller's to reach past
@@ -30,14 +34,15 @@
 //!
 //! These are the measured build's facts, `sev-snp` with `vsock`. Without
 //! `vsock` the listener is TCP, the identity's seed is public, and the hooks sit
-//! on 127.0.0.1, where a broker leg can reach them.
+//! on 127.0.0.1; without `sev-snp` a broker leg or a webhook reaches any
+//! address, those hooks among them.
 
 use enclavid_boundary::{AuthN, AuthZ, Covert};
 use enclavid_boundary_macros::boundary;
 use fleet_stream::bin;
 use hatch_rpc::{
     AuthorizeError, AuthorizeRequest, BlobRequest, KbsError, KbsRequest, KbsResponse, Manifest,
-    ManifestRequest, PullError, Verdict,
+    ManifestRequest, PullError, Verdict, WebhookAnswer, WebhookError, WebhookRequest,
 };
 
 boundary! {
@@ -60,9 +65,14 @@ boundary! {
         /// A pull of what it names with the bearer it carries, as a manifest's is.
         BlobRequest: AuthN::Indifferent,
         /// A request to wherever it names, sent unread from the interface the host
-        /// carries on its own network, with nothing of this role's added and nothing
-        /// of another call's kept: one the host could send itself.
+        /// carries on its own network, with nothing of this role's added, by a
+        /// client that keeps of other calls only what the host sees of them there:
+        /// one the host could send itself.
         KbsRequest: AuthN::Indifferent,
+        /// A `POST` to wherever it names, sent unread as a broker's leg is, by a
+        /// client of its own that keeps of other calls only what the host sees of
+        /// them on its network.
+        WebhookRequest: AuthN::Indifferent,
     }
 
     out (AuthZ, Covert) {
@@ -101,6 +111,15 @@ boundary! {
         /// One of a few fixed texts: no answer, an answer that broke off or ran past
         /// its bound, or a leg this role does not send.
         KbsError: Covert::Bounded,
+        /// Whether the endpoint took the webhook this call sent.
+        WebhookAnswer: AuthZ::NoSecret,
+        /// One boolean.
+        WebhookAnswer: Covert::Bounded,
+        /// A webhook this call sent that got no answer, or one this role does not
+        /// send.
+        WebhookError: AuthZ::NoSecret,
+        /// One of two fixed texts: no answer, or a URL this role does not send to.
+        WebhookError: Covert::Bounded,
     }
 }
 

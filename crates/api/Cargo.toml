@@ -133,6 +133,11 @@ sha2 = "0.10"
 # HKDF-SHA256 for deriving the per-session DisplayField shuffle seed
 # from `tee_seal_key`. See `crate::shuffle` for derivation chain.
 hkdf = "0.12"
+# HMAC-SHA256, the Standard Webhooks signature a webhook is sent with. See
+# `crate::webhooks`.
+hmac = "0.12"
+# A webhook's URL read as the hatch reads it, and kept so.
+url = "2"
 # DisplayField order shuffle inside disclosure envelopes — ChaCha20
 # seeded from `ShuffleKey::derive_envelope_seed`. See `crate::shuffle`.
 rand = { version = "0.8", default-features = false }

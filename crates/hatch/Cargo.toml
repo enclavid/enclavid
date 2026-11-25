@@ -52,6 +52,10 @@ tokio-rustls = { version = "0.26", default-features = false, features = [
 oci-client = { version = "0.16", default-features = false, features = ["rustls-tls", "hickory-dns"] }
 # A key broker's legs, through the same client oci-client builds on.
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "hickory-dns"] }
+# The resolver reqwest builds on, for one that keeps a name's public addresses
+# alone; and a consumer's URL taken apart as reqwest takes it.
+hickory-resolver = "0.26"
+url = "2"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 bytes = "1"
 

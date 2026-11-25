@@ -406,6 +406,16 @@ impl SessionPersister {
             }
             ops.extend(appends.iter().map(|a| a as &dyn WriteField));
             ops.extend(media_ops.iter().map(|m| m as &dyn WriteField));
+            // The round that finishes adds the session's notice, where its
+            // consumer gave a webhook, to the same write that records the
+            // decision.
+            let notice_holder;
+            if decision.is_some()
+                && let Some(notice) = crate::webhooks::notice(&self.session_id, &working)
+            {
+                notice_holder = notice;
+                ops.push(&notice_holder);
+            }
 
             self.commit_ops(&ops).await
         };
@@ -597,9 +607,10 @@ impl SessionPersister {
             .vouch(reason!(
                 Covert::Bounded,
                 "one state op; one metadata op when the round finished, disclosed, captured \
-                 or is the first since preparing — the bit a finishing round gives anyway; at \
-                 most one disclosure; one media op per frame the applicant uploaded, a count \
-                 the policy does not choose"
+                 or is the first since preparing — the bit a finishing round gives anyway, as \
+                 is the notice it adds where the consumer gave a webhook; at most one \
+                 disclosure; one media op per frame the applicant uploaded, a count the policy \
+                 does not choose"
             ));
         let new_version = self
             .session_store
@@ -662,8 +673,8 @@ fn record_disclosures(metadata: &mut SessionMetadata, appends: &[AppendDisclosur
 /// `session_id` is embedded in the envelope as defense-in-depth:
 /// the metadata-level set commitment already binds the per-session
 /// list to its session, but a redundant in-envelope copy means a
-/// consumer that receives a disclosure out-of-band (e.g. via a
-/// future webhook payload) can also self-verify the binding.
+/// consumer that holds a disclosure apart from its pull can also
+/// self-verify the binding.
 ///
 /// Seed: [`ShuffleKey::derive_envelope_seed(session_id,
 /// disclosure_index)`](ShuffleKey::derive_envelope_seed), bound to
