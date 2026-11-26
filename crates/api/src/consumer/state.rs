@@ -19,6 +19,7 @@ use storage_client::SessionStore;
 
 use crate::boundary::Hatch;
 use crate::compositions::Compositions;
+use crate::settings::Settings;
 
 pub struct ConsumerState {
     pub auth: AuthClient<Hatch>,
@@ -30,25 +31,31 @@ pub struct ConsumerState {
     /// The longest a pull may take, which a session's own pull deadline is
     /// held under.
     pub pull_deadline: std::time::Duration,
+    /// The furthest past its creation a session's `expires_at` may lie, which
+    /// a session's own terms are held under.
+    pub session_ttl_secs: u64,
+    /// How long a session's record is kept past its `expires_at`.
+    pub session_keep_secs: u64,
 }
 
 impl ConsumerState {
-    /// `authorize_deadline` is how long the hatch has to answer each
-    /// authorization, over `hatch`.
+    /// Authorizations go over `hatch`, each with the hatch's deadline in
+    /// `settings`.
     pub fn new(
         hatch: Arc<dyn Link<Hatch>>,
         session_store: Arc<SessionStore>,
         attestor: Arc<dyn Attestor>,
         compositions: Arc<Compositions>,
-        authorize_deadline: std::time::Duration,
-        pull_deadline: std::time::Duration,
+        settings: &Settings,
     ) -> Self {
         Self {
-            auth: AuthClient::new(hatch, authorize_deadline),
+            auth: AuthClient::new(hatch, settings.authorize_deadline),
             session_store,
             attestor,
             compositions,
-            pull_deadline,
+            pull_deadline: settings.pull_deadline,
+            session_ttl_secs: settings.session_ttl_secs,
+            session_keep_secs: settings.session_keep_secs,
         }
     }
 }

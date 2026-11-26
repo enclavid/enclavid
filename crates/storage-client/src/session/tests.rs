@@ -13,9 +13,11 @@ use crate::memory::Disk;
 
 const KEY: [u8; 32] = [7; 32];
 const DATA_KEY: [u8; 32] = [9; 32];
+/// When the sessions a test creates are dropped: far past any test's run.
+const UNTIL: u64 = 4_000_000_000;
 
 async fn store_on(disk: &Arc<Disk>, key: [u8; 32]) -> SessionStore {
-    SessionStore::new(disk.connect().await, key, Some(3600))
+    SessionStore::new(disk.connect().await, key)
 }
 
 fn metadata(policy_ref: &str) -> SessionMetadata {
@@ -74,7 +76,7 @@ fn state_at(step: &[u8]) -> SessionState {
 async fn create(store: &SessionStore, id: &str, md: &SessionMetadata) -> u64 {
     let set = set_metadata(md);
     store
-        .create(3600, ops(store, id, &[&set]))
+        .create(UNTIL, ops(store, id, &[&set]))
         .await
         .unwrap()
         .trust(reason!(Replay::Harmless, "test fixture"))
@@ -365,13 +367,29 @@ async fn a_write_at_another_version_is_refused() {
         Err(StoreError::VersionMismatch)
     ));
     assert!(matches!(
-        store.create(3600, ops(&store, "ses_a", &[&set])).await,
+        store.create(UNTIL, ops(&store, "ses_a", &[&set])).await,
         Err(StoreError::VersionMismatch)
     ));
     assert_eq!(
         read_metadata(&store, "ses_a").await.unwrap(),
         Some(metadata("a"))
     );
+}
+
+/// A create keeps the deadline it names, and a write after it leaves that
+/// deadline where it is.
+#[tokio::test]
+async fn a_create_names_the_deadline_and_no_write_moves_it() {
+    let disk = Arc::new(Disk::default());
+    let store = store_on(&disk, KEY).await;
+    let version = create(&store, "ses_a", &metadata("a")).await;
+    let deadline =
+        || disk.records.lock().unwrap()[&store.record("ses_a").into_inner()].deadline_unix_secs;
+    assert_eq!(deadline(), Some(UNTIL));
+
+    let md = metadata("b");
+    write(&store, "ses_a", version, &[&set_metadata(&md)]).await;
+    assert_eq!(deadline(), Some(UNTIL));
 }
 
 /// A capture reads back opened by its content hash, kept under a name that is

@@ -365,7 +365,7 @@ mod tests {
     /// A session no applicant holds yet, as created.
     async fn create() -> (Arc<storage_client::memory::Disk>, Arc<SessionStore>) {
         let disk = Arc::new(storage_client::memory::Disk::default());
-        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
+        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32]));
         let metadata = SessionMetadata::default();
         let set = SetMetadata(
             Storage::expose_builder::<MetadataOp, _>(&metadata)

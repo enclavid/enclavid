@@ -211,7 +211,9 @@ components:
         session_ttl_secs:
           type: integer
           format: int64
-          description: How long the session lives, in seconds.
+          description: |-
+            How far past its creation the session's `expires_at` may lie, in
+            seconds.
           minimum: 1
       additionalProperties: false
 security:

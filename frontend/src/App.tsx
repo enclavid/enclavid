@@ -256,6 +256,13 @@ function Session({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location, sessionId, statusFetched]);
 
+  // A session gone while this page was on it — its time ran out, or it could
+  // not be prepared to run: ended, as `/status` would say.
+  function endHere() {
+    clearKey(sessionId);
+    setTerminal("terminated");
+  }
+
   // The progress a request answered with; once the session has its decision,
   // its key stays with this tab alone.
   function show(next: SessionProgress) {
@@ -270,6 +277,10 @@ function Session({
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
         setTerminal("elsewhere");
+        return;
+      }
+      if (e instanceof ApiError && e.status === 410) {
+        endHere();
         return;
       }
       const msg =
@@ -300,6 +311,8 @@ function Session({
       // this page was on a step.
       if (e instanceof ApiError && e.status === 403) {
         setTerminal("elsewhere");
+      } else if (e instanceof ApiError && e.status === 410) {
+        endHere();
       } else {
         setError(
           e instanceof ApiError
@@ -322,6 +335,8 @@ function Session({
     } catch (e) {
       if (e instanceof ApiError && e.status === 403) {
         setTerminal("elsewhere");
+      } else if (e instanceof ApiError && e.status === 410) {
+        endHere();
       } else {
         setError(
           e instanceof ApiError

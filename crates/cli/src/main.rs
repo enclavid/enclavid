@@ -317,6 +317,12 @@ enum SessionCommand {
         #[arg(long)]
         consumer_ref: Option<String>,
 
+        /// How long the session takes its applicant's requests, in seconds
+        /// from now: its `expires_at`. Without it, the `expires_at` of
+        /// `--from-file`, or an hour.
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        expires_in: Option<u64>,
+
         /// The api build the session must run on, as 96 lowercase hex
         /// characters (the launch measurement). Sent to a gateway in
         /// front of api, which places the session on a group running
@@ -429,6 +435,7 @@ async fn main() -> Result<()> {
                 props,
                 disclosure_key,
                 consumer_ref,
+                expires_in,
                 measurement,
                 api,
                 applicants,
@@ -439,6 +446,7 @@ async fn main() -> Result<()> {
                     props,
                     disclosure_key,
                     consumer_ref,
+                    expires_in,
                     measurement,
                     api,
                     applicants,

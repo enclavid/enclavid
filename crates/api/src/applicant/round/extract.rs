@@ -18,6 +18,7 @@ use storage_client::{DataKeys, Metadata, SealedState, lock_data_keys, unlock_dat
 use crate::applicant::auth::CallerKey;
 use crate::applicant::media_store::HatchMediaStore;
 use crate::applicant::views::SessionProgress;
+use crate::clock;
 use crate::compositions::composition_key;
 use crate::init;
 use crate::locale::Locale;
@@ -25,15 +26,17 @@ use crate::state::AppState;
 
 use super::SessionRunCtx;
 
-/// The answer of a session that has ended, `None` for one that runs on. An
-/// ended session runs no more rounds, and is answered here before any handler
-/// sees it, on every route that runs one:
+/// The answer of a session that has ended by `now`, `None` for one that runs
+/// on. An ended session runs no more rounds, and is answered here before any
+/// handler sees it, on every route that runs one:
 ///   * one that could not be prepared to run, as the request that found that out
 ///     was ([`init::answer`]);
 ///   * a completed one, with the decision it was given. A second run could reach
 ///     `finish` a second time — another disclosure sealed, the decision the
-///     consumer already read rewritten.
-fn ended(metadata: &SessionMetadata) -> Option<Response> {
+///     consumer already read rewritten;
+///   * an expired one, as gone: its consumer reads it as expired, and takes
+///     nothing from it.
+fn ended(metadata: &SessionMetadata, now: u64) -> Option<Response> {
     match metadata.status {
         SessionStatus::InitFailed => {
             // Written together, by `init::record` alone.
@@ -51,7 +54,10 @@ fn ended(metadata: &SessionMetadata) -> Option<Response> {
             // The round that finishes commits the two together.
             None => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
         }),
-        _ => None,
+        SessionStatus::Running if metadata.expired_at(now) => {
+            Some(StatusCode::GONE.into_response())
+        }
+        SessionStatus::Running | SessionStatus::Unspecified => None,
     }
 }
 
@@ -67,7 +73,7 @@ impl FromRequestParts<Arc<AppState>> for SessionRunCtx {
         let ctx = Self::load(parts, state)
             .await
             .map_err(IntoResponse::into_response)?;
-        match ended(&ctx.metadata) {
+        match ended(&ctx.metadata, clock::now()) {
             Some(answer) => Err(answer),
             None => Ok(ctx),
         }
@@ -303,10 +309,13 @@ mod tests {
     use super::*;
     use session_types::{Artifact, Decision, InitError, PullProblem};
 
-    /// What an ended session is answered with in place of a round, `None` for
-    /// one that runs on.
+    /// The time the sessions here are read at.
+    const NOW: u64 = 1_000;
+
+    /// What an ended session is answered with in place of a round at [`NOW`],
+    /// `None` for one that runs on.
     async fn answer_of(metadata: &SessionMetadata) -> Option<(StatusCode, String)> {
-        let response = ended(metadata)?;
+        let response = ended(metadata, NOW)?;
         let status = response.status();
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
@@ -368,8 +377,21 @@ mod tests {
         );
         let running = SessionMetadata {
             status: SessionStatus::Running,
+            expires_at: NOW + 1,
             ..Default::default()
         };
         assert_eq!(answer_of(&running).await, None);
+    }
+
+    /// A session still running at its `expires_at` is gone from then on, and
+    /// runs nothing.
+    #[tokio::test]
+    async fn an_expired_session_runs_nothing() {
+        let expired = SessionMetadata {
+            status: SessionStatus::Running,
+            expires_at: NOW,
+            ..Default::default()
+        };
+        assert_eq!(answer_of(&expired).await.unwrap().0, StatusCode::GONE);
     }
 }

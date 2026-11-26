@@ -6,7 +6,9 @@ type Props = {
 
 /// "You can't continue from here." Reached when:
 ///   * `/status` returns `failed` / `expired` / `unspecified`
-///   * `/status` answers 404 — no such session, or it has expired
+///   * `/status` answers 404 — no such session, or its record was dropped
+///   * a request on a step answers 410 — the session's time ran out, or it
+///     could not be prepared to run
 ///
 /// A service that did not answer is NOT this screen: that says nothing
 /// about the session, and `Unavailable` offers to try again.

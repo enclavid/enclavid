@@ -181,7 +181,8 @@ struct TermsBody {
     #[serde(default)]
     #[cfg_attr(test, schema(value_type = u64, required = false, minimum = 1))]
     cwasm_bytes: Option<NonZeroU64>,
-    /// How long the session lives, in seconds.
+    /// How far past its creation the session's `expires_at` may lie, in
+    /// seconds.
     #[serde(default)]
     #[cfg_attr(test, schema(value_type = u64, required = false, minimum = 1))]
     session_ttl_secs: Option<NonZeroU64>,

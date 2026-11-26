@@ -160,10 +160,13 @@ const SECRET: &[u8] = b"a signing key of 24 byte";
 const URL: &str = "https://hooks.example/enclavid";
 const WEBHOOK_ID: &str = "msg_0123456789abcdef0123456789abcdef";
 
+/// When the sessions a test creates are dropped: far past any test's run.
+const UNTIL: u64 = 4_000_000_000;
+
 /// A store in memory, and the disk it keeps.
 async fn store() -> (Arc<Disk>, Arc<SessionStore>) {
     let disk = Arc::new(Disk::default());
-    let store = Arc::new(SessionStore::new(disk.connect().await, KEY, Some(3600)));
+    let store = Arc::new(SessionStore::new(disk.connect().await, KEY));
     (disk, store)
 }
 
@@ -185,24 +188,36 @@ fn consumer(principal: &str, url: &str, pubkey: &str) -> Consumer {
     }
 }
 
-/// The session `id` of `consumer` with `status`, written by one write with the
-/// notice it adds — as the write that ends a session adds it.
+/// The session `id` of `consumer` with `status`, expiring an hour from now,
+/// written by one write with the notice it adds — as the write that ends a
+/// session adds it.
 async fn session(store: &SessionStore, id: &str, status: SessionStatus, consumer: Consumer) {
-    let metadata = SessionMetadata {
+    let metadata = metadata(status, clock::now() + 3600, consumer);
+    let notice = notice(id, &metadata).expect("a webhook, so a notice");
+    write(store, id, &metadata, &notice).await;
+}
+
+/// A session of `consumer` with `status`, expiring at `expires_at`.
+fn metadata(status: SessionStatus, expires_at: u64, consumer: Consumer) -> SessionMetadata {
+    SessionMetadata {
         status,
+        expires_at,
         consumer: Some(consumer),
         ..SessionMetadata::default()
-    };
+    }
+}
+
+/// The session `id`, created with `metadata` and `notice`.
+async fn write(store: &SessionStore, id: &str, metadata: &SessionMetadata, notice: &AddNotice) {
     let set = SetMetadata(
-        Storage::expose_builder::<MetadataOp, _>(&metadata)
+        Storage::expose_builder::<MetadataOp, _>(metadata)
             .vouch(reason!(Covert::NotChosen, "test fixture")),
     );
-    let notice = notice(id, &metadata).expect("a webhook, so a notice");
     let ops = store
-        .seal(id, &[&set, &notice])
+        .seal(id, &[&set, notice])
         .unwrap()
         .vouch(reason!(Covert::Bounded, "test fixture"));
-    store.create(3600, ops).await.unwrap();
+    store.create(UNTIL, ops).await.unwrap();
 }
 
 fn header<'a>(webhook: &'a WebhookRequest, name: &str) -> &'a str {
@@ -310,6 +325,23 @@ fn a_notice_is_kept_in_one_frame() {
     assert_eq!(session_types::decode::<NoticeBody>(&kept).unwrap(), notice);
 }
 
+/// A notice taken while its session runs is due at the schedule's next step, or
+/// at the session's `expires_at` where that comes first — past the last step
+/// too, never dropped.
+#[test]
+fn a_running_sessions_notice_waits_until_its_expiry_at_the_latest() {
+    let schedule = Settings::default().schedule;
+    let waiting = |expires_at, now| waiting(&schedule, 100, expires_at, now);
+    assert_eq!(waiting(1_000, 100), Settle::Again { due_unix_secs: 105 });
+    assert_eq!(waiting(300, 105), Settle::Again { due_unix_secs: 300 });
+    assert_eq!(
+        waiting(200_000, 99_405),
+        Settle::Again {
+            due_unix_secs: 200_000
+        }
+    );
+}
+
 /// A notice not taken is due at the schedule's next step past the attempt, and
 /// dropped past its last.
 #[test]
@@ -393,14 +425,14 @@ async fn an_ended_session_sends_its_webhook_once() {
 async fn a_webhook_not_taken_is_due_again() {
     let (disk, store) = store().await;
     let (_secret, public) = enclavid_crypto::generate_recipient();
-    let before = now_unix();
+    let before = clock::now();
     let failed = SessionStatus::InitFailed;
     session(&store, "ses_a", failed, consumer("org-1", URL, &public)).await;
     let fake = FakeHatch::answering(&[false]);
     let webhooks = webhooks(&store, &fake).await;
 
     webhooks.step().await;
-    let after = now_unix();
+    let after = clock::now();
     let first = due(&disk);
     assert_eq!(first.len(), 1);
     assert!((before + 5..=after + 5).contains(&first[0]), "{first:?}");
@@ -439,6 +471,83 @@ async fn a_notice_is_sent_only_for_a_session_that_ended() {
     webhooks.step().await;
     assert!(fake.sent().is_empty());
     assert!(due(&disk).is_empty(), "the session is gone, and its notice");
+}
+
+/// A session is created with a notice due at its `expires_at`: taken before
+/// then it waits for that time, and once the session's time is up it sends the
+/// webhook as for any end, the session id sealed to the consumer's key.
+#[tokio::test]
+async fn a_session_whose_time_runs_out_sends_its_webhook() {
+    let (disk, store) = store().await;
+    let (secret, public) = enclavid_crypto::generate_recipient();
+    let running = SessionStatus::Running;
+    let later = clock::now() + 3600;
+    let waits = metadata(running, later, consumer("org-1", URL, &public));
+    let pending = timer("ses_later", &waits).expect("a webhook, so a notice");
+    write(&store, "ses_later", &waits, &pending).await;
+    let fake = FakeHatch::answering(&[true]);
+    let webhooks = webhooks(&store, &fake).await;
+
+    webhooks.step().await;
+    assert_eq!(due(&disk), [later], "kept for its time");
+    all_due(&disk);
+    webhooks.step().await;
+    assert!(fake.sent().is_empty());
+    assert_eq!(due(&disk), [later], "taken early, it waits for its time");
+
+    let expired = metadata(running, clock::now(), consumer("org-1", URL, &public));
+    let due_now = timer("ses_now", &expired).expect("a webhook, so a notice");
+    write(&store, "ses_now", &expired, &due_now).await;
+    webhooks.step().await;
+    let sent = fake.sent();
+    assert_eq!(sent.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&sent[0].body).unwrap();
+    assert_eq!(body["type"], "session.ended");
+    let sealed = Base64::decode_vec(body["data"]["sealed_session_id"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        enclavid_crypto::open_sealed(&sealed, &secret).unwrap(),
+        b"ses_now"
+    );
+    assert_eq!(due(&disk), [later], "only the other session's is left");
+}
+
+/// A write that ends a session before its `expires_at` puts its notice in the
+/// place of the one the session was created with: one webhook, sent at the end,
+/// and none when the session's time would have run out.
+#[tokio::test]
+async fn a_session_that_ends_first_sends_one_webhook() {
+    let (disk, store) = store().await;
+    let (_secret, public) = enclavid_crypto::generate_recipient();
+    let later = clock::now() + 3600;
+    let created = metadata(
+        SessionStatus::Running,
+        later,
+        consumer("org-1", URL, &public),
+    );
+    let at_expiry = timer("ses_a", &created).expect("a webhook, so a notice");
+    write(&store, "ses_a", &created, &at_expiry).await;
+
+    let ended = SessionMetadata {
+        status: SessionStatus::Completed,
+        ..created
+    };
+    let end = notice("ses_a", &ended).expect("a webhook, so a notice");
+    let set = SetMetadata(
+        Storage::expose_builder::<MetadataOp, _>(&ended)
+            .vouch(reason!(Covert::NotChosen, "test fixture")),
+    );
+    let ops = store
+        .seal("ses_a", &[&set, &end])
+        .unwrap()
+        .vouch(reason!(Covert::Bounded, "test fixture"));
+    store.write(Some(1), ops).await.unwrap();
+    assert_eq!(due(&disk).len(), 1, "one notice a session");
+
+    let fake = FakeHatch::answering(&[true]);
+    let webhooks = webhooks(&store, &fake).await;
+    webhooks.step().await;
+    assert_eq!(fake.sent().len(), 1);
+    assert!(due(&disk).is_empty());
 }
 
 /// A consumer whose endpoint stalls has its own few attempts under way and no

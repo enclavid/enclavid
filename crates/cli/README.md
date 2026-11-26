@@ -77,6 +77,8 @@ enclavid session create --policy <pinned-ref> --applicants https://verify.enclav
 
 `create` caches the API, the session's token, the group it was placed on and the disclosure secret, so `session get` and `session disclosures` name the session alone.
 
+A session takes its applicant's requests until its `expires_at`: `--expires-in <secs>` from now, else the one `--from-file` gives, else an hour.
+
 ### Through a gateway
 
 When a gateway sits in front of api, it places a session on a group of api instances and answers with that group, `x-enclavid-group`, which the CLI caches. From then on `session get` and `session disclosures` put the group in front of the path (`<api>/-<label>.<build>/api/v1/sessions/<id>/...`), and the printed applicant link goes under it too (`<applicant>/-<label>.<build>/<id>`), because the gateway routes a request by that marker alone. Do not write the marker into either origin by hand — the CLI adds it.

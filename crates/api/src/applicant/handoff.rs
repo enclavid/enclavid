@@ -20,7 +20,6 @@
 //! is put away, and every code it showed dies with that.
 
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -38,6 +37,7 @@ use storage_client::{
     StoreError, encode_padded, lock_data_keys, lock_digest, unlock_data_keys,
 };
 
+use crate::clock::now;
 use crate::state::AppState;
 
 use super::auth::CallerKey;
@@ -283,10 +283,10 @@ async fn takeover(
 }
 
 /// The lock of a running session an applicant holds; 409 for any other — one
-/// no applicant holds yet has nothing to hand over, and one that ended takes
-/// no hand.
+/// no applicant holds yet has nothing to hand over, and one that ended, or
+/// expired, takes no hand.
 fn held_lock(metadata: &SessionMetadata) -> Result<&[u8], StatusCode> {
-    if metadata.status != SessionStatus::Running {
+    if metadata.status != SessionStatus::Running || metadata.expired_at(now()) {
         return Err(StatusCode::CONFLICT);
     }
     metadata
@@ -303,11 +303,4 @@ fn refused(e: StoreError) -> StatusCode {
         StoreError::Crypto(_) => StatusCode::FORBIDDEN,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
     }
-}
-
-fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
 }

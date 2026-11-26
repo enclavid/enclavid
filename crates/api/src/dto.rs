@@ -10,9 +10,8 @@
 //!     policy-internal field (debug variant, future-only flag, ...)
 //!     would silently appear in the public API. The dto module is
 //!     where we explicitly opt fields IN to the wire contract.
-//!   * **Shape control.** Aliasing through serde-remote (e.g.
-//!     `SessionStatusDef`) keeps wire shapes stable independently of
-//!     foreign type evolution.
+//!   * **Shape control.** A view of its own (e.g. `StatusView`) keeps wire
+//!     shapes stable independently of foreign type evolution.
 //!
 //! Used by:
 //!   * `applicant::persister` — wraps the round's consented
@@ -29,7 +28,7 @@ use sha2::{Digest, Sha256};
 use session_types::{
     Artifact, CompileFault, Decision, Disclosure as PromptDisclosure,
     DisplayField as ProtoDisplayField, InitError, Localized, PropsProblem, PullProblem,
-    SessionStatus,
+    SessionMetadata, SessionStatus,
 };
 
 use crate::locale::Locale;
@@ -311,25 +310,30 @@ impl PluginView {
     }
 }
 
-/// Serde "remote" definition for the proto-generated `SessionStatus`
-/// enum. Variants must mirror the foreign enum exactly; serde uses
-/// this shadow type only as a description of how to serialize the
-/// real `SessionStatus` (declared in session-types). Lets the JSON
-/// wire shape live in the api crate without an orphan-rule wrapper
-/// or a transport-layer serde-aware build.rs.
-///
-/// Used by both consumer/session.rs and applicant/status.rs via
-/// `#[serde(with = "dto::SessionStatusDef")]` on a `SessionStatus`
-/// field — same wire string ("running", "completed", ...) for both
-/// audiences.
-#[derive(Serialize)]
-#[serde(remote = "SessionStatus", rename_all = "snake_case")]
-pub enum SessionStatusDef {
+/// A session's status on the wire, the same strings for its consumer and its
+/// applicant's page: its record's, and `expired` for a running session whose
+/// `expires_at` has come ([`SessionMetadata::expired_at`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusView {
     Unspecified,
     Running,
     Completed,
     InitFailed,
     Expired,
+}
+
+impl StatusView {
+    /// The status of the session `metadata` holds, at `now`.
+    pub fn of(metadata: &SessionMetadata, now: u64) -> Self {
+        match metadata.status {
+            SessionStatus::Running if metadata.expired_at(now) => Self::Expired,
+            SessionStatus::Running => Self::Running,
+            SessionStatus::Completed => Self::Completed,
+            SessionStatus::InitFailed => Self::InitFailed,
+            SessionStatus::Unspecified => Self::Unspecified,
+        }
+    }
 }
 
 /// Disclosure envelope schema version. Bumped only when the wire
@@ -462,6 +466,22 @@ pub fn consent_disclosure_digest(d: &PromptDisclosure) -> String {
 mod tests {
     use super::*;
     use session_types::{Disclosure as PromptDisclosure, Translation};
+
+    /// A running session reads as expired from its `expires_at` on, and one
+    /// that ended before reads as it ended.
+    #[test]
+    fn a_running_session_reads_as_expired_from_its_time() {
+        let at = |status| SessionMetadata {
+            status,
+            expires_at: 100,
+            ..Default::default()
+        };
+        let wire = |status, now| serde_json::to_value(StatusView::of(&at(status), now)).unwrap();
+        assert_eq!(wire(SessionStatus::Running, 99), "running");
+        assert_eq!(wire(SessionStatus::Running, 100), "expired");
+        assert_eq!(wire(SessionStatus::Completed, 1_000), "completed");
+        assert_eq!(wire(SessionStatus::InitFailed, 1_000), "init_failed");
+    }
 
     fn loc(text: &str) -> Localized {
         Localized {

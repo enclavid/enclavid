@@ -1,6 +1,5 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -19,8 +18,9 @@ use session_types::{
     Webhook, is_wit_name,
 };
 use storage_client::boundary::Storage;
-use storage_client::{MetadataOp, SetMetadata};
+use storage_client::{MetadataOp, SetMetadata, WriteField};
 
+use crate::clock;
 use crate::dto::{PluginView, ResolvedPolicyView};
 use crate::init;
 use crate::limits::{
@@ -106,9 +106,16 @@ pub struct CreateSessionRequest {
     pub warmup: bool,
 
     /// The consumer's webhook, told when the session ends — its policy gave a
-    /// decision, or it could not be prepared to run. Omit for none.
+    /// decision, it could not be prepared to run, or its `expires_at` came
+    /// first. Omit for none.
     #[serde(default)]
     pub webhook: Option<WebhookSetup>,
+
+    /// When the session stops taking its applicant's requests, in unix seconds:
+    /// after its creation, and no further past it than its terms let it lie
+    /// (`terms.session_ttl_secs` in its view). Its record is kept a while after
+    /// it, for the consumer to read what it came to.
+    pub expires_at: u64,
 }
 
 /// A webhook as a creation gives it. Every field is required.
@@ -429,26 +436,24 @@ pub struct CreateSessionResponse {
 }
 
 /// The terms the consumer's limits asked for, each held to the fleet's own
-/// ceiling: what this build compiles and runs at most, how long the store keeps
-/// a session (`ttl`, `None` for no end), how long a pull may take
+/// ceiling: what this build compiles and runs at most, how far past its
+/// creation a session's `expires_at` may lie (`ttl`), how long a pull may take
 /// (`pull_deadline`). A term asked for above its ceiling is the ceiling; one
 /// not asked for stays the fleet's own.
-fn held(
-    asked: SessionTerms,
-    ttl: Option<u64>,
-    pull_deadline: std::time::Duration,
-) -> session_types::Terms {
-    let under =
-        |term: Option<u64>, ceiling: Option<u64>| term.map(|t| ceiling.map_or(t, |c| t.min(c)));
+fn held(asked: SessionTerms, ttl: u64, pull_deadline: std::time::Duration) -> session_types::Terms {
+    let under = |term: Option<u64>, ceiling: u64| term.map(|t| t.min(ceiling));
     session_types::Terms {
-        components_bytes: under(
-            asked.components_bytes,
-            Some(engine_rpc::MAX_COMPONENTS_BYTES),
-        ),
-        cwasm_bytes: under(asked.cwasm_bytes, Some(engine_rpc::MAX_CWASM_BYTES)),
+        components_bytes: under(asked.components_bytes, engine_rpc::MAX_COMPONENTS_BYTES),
+        cwasm_bytes: under(asked.cwasm_bytes, engine_rpc::MAX_CWASM_BYTES),
         session_ttl_secs: under(asked.session_ttl_secs, ttl),
-        pull_deadline_secs: under(asked.pull_deadline_secs, Some(pull_deadline.as_secs())),
+        pull_deadline_secs: under(asked.pull_deadline_secs, pull_deadline.as_secs()),
     }
+}
+
+/// Whether `expires_at` is one a session created at `created_at` may keep:
+/// after its creation, and at most `ttl` past it.
+fn expires_in_time(created_at: u64, expires_at: u64, ttl: u64) -> bool {
+    expires_at > created_at && expires_at - created_at <= ttl
 }
 
 /// Route factory: bare `post(handler)` MethodRouter. Auth is attached
@@ -500,6 +505,16 @@ async fn create(
     let props = props::encode(body.props.as_ref()).ok_or(StatusCode::BAD_REQUEST)?;
     let webhook = body.webhook.map(webhook).transpose()?;
 
+    // The window the consumer gives the session, held to its terms before
+    // anything is minted for it.
+    let created_at = clock::now();
+    let terms = held(asked, state.session_ttl_secs, state.pull_deadline);
+    let ttl = session_types::Terms::within(terms.session_ttl_secs, state.session_ttl_secs);
+    if !expires_in_time(created_at, body.expires_at, ttl) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let kept_until = body.expires_at.saturating_add(state.session_keep_secs);
+
     let session_id = generate_session_id();
 
     // Per-session capability bearer. Returned to the consumer below
@@ -519,10 +534,6 @@ async fn create(
         .mint(&report_data)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let created_at = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
     let consumer = Consumer {
         // Per-session access gate (defense-in-depth) — see
         // ConsumerAccess proto doc.
@@ -549,6 +560,8 @@ async fn create(
         // TEE-trusted lifecycle status — the sole copy there is.
         status: SessionStatus::Running,
         created_at,
+        expires_at: body.expires_at,
+        kept_until,
         // Persister increments this atomically with each
         // AppendDisclosure write — see SessionPersister.
         disclosure_count: 0,
@@ -567,7 +580,7 @@ async fn create(
         prepared: None,
         // Set with `InitFailed`, if preparing the session fails: see `crate::init`.
         init_error: None,
-        terms: held(asked, state.session_store.ttl_secs(), state.pull_deadline),
+        terms,
         // The same bytes the consumer is answered with below, kept for the
         // session's applicant page.
         quote: Some(SessionQuote {
@@ -590,21 +603,27 @@ async fn create(
             "initial /create write before any policy runs; fields are consumer-controlled, not policy-controlled — zero covert bandwidth"
         ),
     ));
+    // The notice that tells the consumer its session's time ran out, where it
+    // gave a webhook.
+    let timer = crate::webhooks::timer(&session_id, &metadata);
+    let mut fields: Vec<&dyn WriteField> = vec![&set_metadata];
+    fields.extend(timer.as_ref().map(|t| t as &dyn WriteField));
     let ops = state
         .session_store
-        .seal(&session_id, &[&set_metadata])
+        .seal(&session_id, &fields)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .vouch(reason!(
             Covert::NotChosen,
-            "no policy has run at /create — the single metadata op is fixed, not policy bandwidth"
+            "no policy has run at /create: the metadata, and the notice where the consumer \
+             gave a webhook — whether it did is its own setup"
         ));
-    // A session lives as long as its terms say, where they say: its deadline
-    // is set by this write, once.
-    let version = match metadata.terms.session_ttl_secs {
-        Some(ttl) => state.session_store.create(ttl, ops).await,
-        None => state.session_store.write(None, ops).await,
-    }
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    // The record is kept past the session's expiry for its consumer to read:
+    // its deadline is set by this write, once.
+    let version = state
+        .session_store
+        .create(kept_until, ops)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // After the write, so a warmup never prepares a session that does not
     // exist; not awaited, so the response does not wait for the compile.
@@ -870,7 +889,7 @@ mod tests {
             pull_deadline_secs: Some(u64::MAX),
         };
         assert_eq!(
-            held(asked, Some(3600), PULL),
+            held(asked, 3600, PULL),
             session_types::Terms {
                 components_bytes: Some(engine_rpc::MAX_COMPONENTS_BYTES),
                 cwasm_bytes: Some(engine_rpc::MAX_CWASM_BYTES),
@@ -880,25 +899,36 @@ mod tests {
         );
     }
 
-    /// A term asked for under its ceiling stands as asked; where the store keeps
-    /// sessions with no end, any TTL asked for stands.
+    /// A term asked for under its ceiling stands as asked.
     #[test]
     fn a_term_under_its_ceiling_stands() {
         let asked = SessionTerms {
             components_bytes: Some(1),
             cwasm_bytes: Some(2),
-            session_ttl_secs: Some(u64::MAX),
+            session_ttl_secs: Some(3),
             pull_deadline_secs: Some(4),
         };
         assert_eq!(
-            held(asked, None, PULL),
+            held(asked, 3600, PULL),
             session_types::Terms {
                 components_bytes: Some(1),
                 cwasm_bytes: Some(2),
-                session_ttl_secs: Some(u64::MAX),
+                session_ttl_secs: Some(3),
                 pull_deadline_secs: Some(4),
             }
         );
+    }
+
+    /// A session expires after its creation and no further past it than its
+    /// terms let it: at the ceiling itself, and not a second past it.
+    #[test]
+    fn a_session_expires_within_its_terms() {
+        assert!(expires_in_time(100, 101, 3600));
+        assert!(expires_in_time(100, 3700, 3600));
+        assert!(!expires_in_time(100, 3701, 3600));
+        assert!(!expires_in_time(100, 100, 3600));
+        assert!(!expires_in_time(100, 0, 3600));
+        assert!(!expires_in_time(100, u64::MAX, 3600));
     }
 
     /// A term not asked for stays the fleet's own: none is written into the
@@ -911,9 +941,6 @@ mod tests {
             session_ttl_secs: None,
             pull_deadline_secs: None,
         };
-        assert_eq!(
-            held(asked, Some(3600), PULL),
-            session_types::Terms::default()
-        );
+        assert_eq!(held(asked, 3600, PULL), session_types::Terms::default());
     }
 }

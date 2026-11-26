@@ -25,6 +25,7 @@ use axum::routing::{MethodRouter, post};
 use session_types::SessionStatus;
 use storage_client::Metadata;
 
+use crate::clock;
 use crate::init;
 
 use super::auth::{Principal, SessionToken, trust_metadata};
@@ -48,7 +49,7 @@ async fn warmup(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
-    if metadata.status != SessionStatus::Running {
+    if metadata.status != SessionStatus::Running || metadata.expired_at(clock::now()) {
         return Err(StatusCode::CONFLICT);
     }
     init::warm_in_background(

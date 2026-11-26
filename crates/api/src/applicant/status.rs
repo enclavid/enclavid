@@ -7,10 +7,10 @@ use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
 use enclavid_boundary::{AuthZ, Replay, reason};
-use session_types::SessionStatus;
 use storage_client::Metadata;
 
-use crate::dto;
+use crate::clock;
+use crate::dto::StatusView;
 use crate::state::AppState;
 
 #[derive(Serialize)]
@@ -18,9 +18,7 @@ pub struct StatusResponse {
     /// Lifecycle label — same wire shape as the consumer API's
     /// `GET /sessions/:id` so frontends can switch on the same
     /// strings ("running" / "completed" / "init_failed" / "expired").
-    /// Renders via the shared `dto::SessionStatusDef` remote.
-    #[serde(with = "dto::SessionStatusDef")]
-    pub status: SessionStatus,
+    pub status: StatusView,
 }
 
 /// Route factory. Public (no auth layer) — see `applicant::router`.
@@ -33,7 +31,8 @@ pub(super) fn get_status() -> MethodRouter<Arc<AppState>> {
 /// Frontend uses this as the first request to decide which UI flow
 /// to run (continue running session / show "done" / show "ended").
 /// We read the encrypted metadata (AEAD-bound to session_id) and
-/// surface its `status` field, the only copy of the status there is.
+/// surface its `status` field, the only copy of the status there is, as it
+/// stands now: a running session past its `expires_at` has expired.
 async fn status(
     Path(session_id): Path<String>,
     State(state): State<Arc<AppState>>,
@@ -71,8 +70,7 @@ fixes it via fresh state read. Not a security gate.
         .into_inner()
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let status =
-        SessionStatus::try_from(metadata.status).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(StatusResponse { status }))
+    Ok(Json(StatusResponse {
+        status: StatusView::of(&metadata, clock::now()),
+    }))
 }

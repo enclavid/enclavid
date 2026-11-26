@@ -1,6 +1,7 @@
 mod applicant;
 mod assets;
 mod boundary;
+mod clock;
 mod compiler;
 mod compositions;
 mod consumer;
@@ -152,8 +153,8 @@ async fn main() {
     // object_store cache were retired (the hatch now fronts external egress
     // only). All AEAD sealing stays TEE-side in `SessionStore` / `CacheStore`;
     // the storage-CVM sees ciphertext under names derived from keys only api
-    // holds. Each session lives `session_ttl_secs` from its creation
-    // (`settings`).
+    // holds. Each session's record is kept `session_keep_secs` past its
+    // `expires_at` (`settings`).
     let storage = build_storage_link(
         legs.storage,
         attestor.clone(),
@@ -163,11 +164,7 @@ async fn main() {
     )
     .await;
     info!("api: storage-CVM connected", reason!("a constant"));
-    let session_store = Arc::new(SessionStore::new(
-        storage.clone(),
-        tee_seal_key,
-        Some(settings.session_ttl_secs),
-    ));
+    let session_store = Arc::new(SessionStore::new(storage.clone(), tee_seal_key));
     let cache_store = CacheStore::new(storage, &tee_seal_key);
 
     // Two listeners, two routers, one process. Topology rationale: TLS
@@ -210,8 +207,7 @@ async fn main() {
         session_store,
         attestor,
         applicant_state.compositions.clone(),
-        settings.authorize_deadline,
-        settings.pull_deadline,
+        &settings,
     ));
 
     let consumer_app = consumer::router(consumer_state);

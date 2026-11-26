@@ -63,7 +63,8 @@ pub fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, CodecError> {
 pub enum SessionStatus {
     #[default]
     Unspecified = 0,
-    /// Session created and ready; multiple /connect + /input rounds here.
+    /// Session created and ready; multiple /connect + /input rounds here,
+    /// until its `expires_at` ([`SessionMetadata::expired_at`]).
     Running = 1,
     /// The policy gave its decision: its disclosures may be pulled, and the
     /// consumer's webhook goes out.
@@ -71,8 +72,6 @@ pub enum SessionStatus {
     /// The session could not be prepared to run, and asking again will not
     /// change that — see [`SessionMetadata::init_error`]. Terminal.
     InitFailed = 3,
-    /// Idle TTL elapsed without applicant interaction.
-    Expired = 4,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +100,13 @@ pub struct SessionMetadata {
     pub consumer: Option<Consumer>,
     pub status: SessionStatus,
     pub created_at: u64,
+    /// When the session stops taking its applicant's requests, in unix
+    /// seconds: its consumer's own, given at the creation.
+    pub expires_at: u64,
+    /// When the store drops the session's record, in unix seconds: as the
+    /// creation set it, `expires_at` and the time the fleet keeps a record past
+    /// it.
+    pub kept_until: u64,
     pub disclosure_count: u64,
     /// Per-entry leaf hashes (SHA-256, 32 bytes each) of every disclosure
     /// ciphertext emitted this session — the authoritative TEE-side source for
@@ -171,6 +177,16 @@ pub struct SessionMetadata {
     pub data_key_lock: Option<Vec<u8>>,
 }
 
+impl SessionMetadata {
+    /// Whether the session's time ran out by `now`, in unix seconds: still
+    /// running at its `expires_at` or after. Read off the clock and never
+    /// written — a write at that time would show the host which sessions ran
+    /// out of it.
+    pub fn expired_at(&self, now: u64) -> bool {
+        self.status == SessionStatus::Running && now >= self.expires_at
+    }
+}
+
 /// A session's quote as it is kept: which backend minted it, and the signed
 /// payload. What a sender may claim beside a quote — the measurement, the part —
 /// is not kept: the signed payload is what says it.
@@ -194,8 +210,8 @@ pub struct Terms {
     pub components_bytes: Option<u64>,
     /// The composition compiled, in bytes.
     pub cwasm_bytes: Option<u64>,
-    /// How long the session lives, in seconds — its deadline is set once, from
-    /// the creation.
+    /// How far past its creation the session's `expires_at` may lie, in
+    /// seconds.
     pub session_ttl_secs: Option<u64>,
     /// How long one pull from a registry may take, in seconds.
     pub pull_deadline_secs: Option<u64>,
@@ -1281,6 +1297,27 @@ mod terms_tests {
         struct Empty {}
         let back: Terms = decode(&encode(&Empty {}).unwrap()).unwrap();
         assert_eq!(back, Terms::default());
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    /// A running session has expired from its `expires_at` on; a session that
+    /// ended before it has not.
+    #[test]
+    fn a_running_session_expires_at_its_time() {
+        let at = |status| SessionMetadata {
+            status,
+            expires_at: 100,
+            ..Default::default()
+        };
+        assert!(!at(SessionStatus::Running).expired_at(99));
+        assert!(at(SessionStatus::Running).expired_at(100));
+        for ended in [SessionStatus::Completed, SessionStatus::InitFailed] {
+            assert!(!at(ended).expired_at(1_000));
+        }
     }
 }
 

@@ -90,8 +90,8 @@ pub struct Ctx<'a> {
 /// a key only api holds ([`record`](Self::record)), so neither the storage-CVM
 /// nor the volume it keeps the record on ever holds the id. What the record must
 /// be for a write to land crosses as an [`Expected`], which [`Storage`] answers
-/// in full: the version is the store's own counter, and the deadline is the
-/// create's time plus a configured lifetime.
+/// in full: the version is the store's own counter, and the deadline is the one
+/// the create names.
 ///
 /// The fields are another matter. The volume holds them as they were sent, so
 /// each is the host's to read, and each is an op of its own kind, answered for
@@ -118,20 +118,12 @@ pub struct SessionStore {
     /// The subkey of `tee_seal_key` a hand-over is sealed under, its own label
     /// apart from every other use of the master.
     handoff_key: Arc<SecretBox<[u8; 32]>>,
-    /// ABSOLUTE session lifetime in seconds. `Some(t)` ⇒ the deadline is set ONCE
-    /// at create to `created_at + t` and never refreshed — a fixed cap after which
-    /// the storage-CVM sweeper GCs the session (abandoned or completed-and-pulled).
-    /// The sweep runs on the storage-CVM's guarded clock, but the deadline lies
-    /// on the host's volume, so a host can move it; and it can keep a copy of the
-    /// volume regardless. Sized so the consumer has time to pull disclosures
-    /// post-completion. `None` = no expiry.
-    ttl_secs: Option<u64>,
     /// Woken by each write that adds a notice ([`notice_written`](Self::notice_written)).
     noticed: Arc<Notify>,
 }
 
 impl SessionStore {
-    pub fn new(link: Arc<dyn Link>, tee_seal_key: [u8; 32], ttl_secs: Option<u64>) -> Self {
+    pub fn new(link: Arc<dyn Link>, tee_seal_key: [u8; 32]) -> Self {
         Self {
             link,
             record_key: Arc::new(SecretBox::new(Box::new(derive_key(
@@ -143,7 +135,6 @@ impl SessionStore {
                 HANDOFF_INFO,
             )))),
             tee_seal_key: Arc::new(SecretBox::new(Box::new(tee_seal_key))),
-            ttl_secs,
             noticed: Arc::new(Notify::new()),
         }
     }
@@ -167,26 +158,6 @@ impl SessionStore {
             },
         );
         name.build()
-    }
-
-    /// How long a session lives, as this store was given it: what a session's
-    /// own terms are held under.
-    pub fn ttl_secs(&self) -> Option<u64> {
-        self.ttl_secs
-    }
-
-    /// The absolute deadline (unix secs) for a session created NOW to live
-    /// `ttl` — `None` for no TTL. Computed TEE-side and passed ONLY on the create
-    /// write (see [`write`](Self::write)); subsequent writes name a version
-    /// instead, so the deadline is never moved.
-    fn deadline(ttl: Option<u64>) -> Option<u64> {
-        ttl.map(|ttl| {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            now.saturating_add(ttl)
-        })
     }
 
     /// Read typed session fields in one batch. Returns `(fields, version)`
@@ -257,44 +228,45 @@ impl SessionStore {
     /// type-level guarantee that nothing unanswered is written.
     ///
     /// `expected_version` is the version check: `None` means the
-    /// session must not exist yet (used by /create); `Some(V)` means
-    /// the session's current version in the store must equal V.
+    /// session must not exist yet, and is kept with no deadline — a session
+    /// the store is to drop is made by [`create`](Self::create); `Some(V)`
+    /// means the session's current version in the store must equal V.
     /// Mismatch surfaces as `StoreError::VersionMismatch` (HTTP 412).
     pub async fn write(
         &self,
         expected_version: Option<u64>,
         ops: Exposed<Ops<Storage>, (), Storage>,
     ) -> Result<Untrusted<u64, (Replay,), Storage>, StoreError> {
-        self.write_living(expected_version, self.ttl_secs, ops)
-            .await
+        let expected = match expected_version {
+            None => Expected::Absent {
+                deadline_unix_secs: None,
+            },
+            Some(version) => Expected::Version(version),
+        };
+        self.write_expecting(expected, ops).await
     }
 
     /// The create write — [`write`](Self::write) with `expected_version` `None`
-    /// — for a session that lives `ttl_secs` rather than this store's own TTL:
-    /// its own terms'.
+    /// — for a session the store drops at `until_unix_secs`. Only a create
+    /// names a deadline: every write after it names a version instead, so the
+    /// deadline is never moved.
     pub async fn create(
         &self,
-        ttl_secs: u64,
+        until_unix_secs: u64,
         ops: Exposed<Ops<Storage>, (), Storage>,
     ) -> Result<Untrusted<u64, (Replay,), Storage>, StoreError> {
-        self.write_living(None, Some(ttl_secs), ops).await
+        let expected = Expected::Absent {
+            deadline_unix_secs: Some(until_unix_secs),
+        };
+        self.write_expecting(expected, ops).await
     }
 
-    async fn write_living(
+    async fn write_expecting(
         &self,
-        expected_version: Option<u64>,
-        ttl: Option<u64>,
+        expected: Expected,
         ops: Exposed<Ops<Storage>, (), Storage>,
     ) -> Result<Untrusted<u64, (Replay,), Storage>, StoreError> {
-        // Absolute TTL: set the deadline ONLY on the create write (`None` =
-        // must-not-exist); every subsequent update names a version instead, so
-        // the fixed `created_at + ttl` cap is never moved.
-        let expected = Storage::expose(match expected_version {
-            None => Expected::Absent {
-                deadline_unix_secs: Self::deadline(ttl),
-            },
-            Some(version) => Expected::Version(version),
-        });
+        let expected = Storage::expose(expected);
         let adds_notice = ops.as_inner().has_notice();
         let version = storage(self.link.as_ref())?.write(expected, ops).await?;
         if adds_notice {
