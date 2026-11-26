@@ -239,11 +239,15 @@ what is under [Not yet](#not-yet) comes first.
   the applicant, and takes the selfie itself once the face holds still. Videos
   are recorded through prompts such as head turns and colour flashes, and a
   plugin checks each prompt again in the enclave.
-- **Webhooks** — a session that ends, with its policy's decision or unable to
-  run, sends its consumer one `session.ended` webhook, signed as Standard
-  Webhooks signs and retried for about a day. It carries the consumer's own ref
-  and the session id sealed to the consumer's key; the consumer reads what the
-  session came to itself.
+- **Session expiry** — the consumer gives each session an `expires_at`; from
+  then on it takes none of its applicant's requests, by the enclave's own
+  clock, and reads as expired. Its record is kept a while after, for the
+  consumer to read what it came to.
+- **Webhooks** — a session that ends, with its policy's decision, unable to
+  run, or when its `expires_at` comes first, sends its consumer one
+  `session.ended` webhook, signed as Standard Webhooks signs and retried for
+  about a day. It carries the consumer's own ref and the session id sealed to
+  the consumer's key; the consumer reads what the session came to itself.
 - **Tooling** — a command-line client for authoring and pushing policies and
   plugins and for creating and reading sessions, a TypeScript policy SDK with
   templates and `npm create enclavid` to start from one (`sdk/typescript`,

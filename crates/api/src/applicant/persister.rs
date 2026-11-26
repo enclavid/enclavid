@@ -57,6 +57,7 @@ use storage_client::{
 // keeping api free of the runtime.
 use engine_rpc::CallbackError;
 
+use crate::clock;
 use crate::disclosure_commit;
 use crate::dto::{self, DisclosureEnvelope, ENVELOPE_VERSION};
 use crate::shuffle::ShuffleKey;
@@ -262,9 +263,9 @@ impl SessionPersister {
     /// the round's [`RoundAwaiting`] — and a reload finds the same in the store.
     ///
     /// A round writes no other status. InitFailed is `crate::init`'s, decided
-    /// before a round runs; Expired is never written — TTL is enforced inside
-    /// the storage-CVM off the per-session deadline (no host-visible status
-    /// byte). Engine errors stay as Running (operationally retried).
+    /// before a round runs. Expiry is no status: it is read off the clock, and
+    /// nothing a round brings lands from the session's `expires_at` on.
+    /// Engine errors stay as Running (operationally retried).
     ///
     /// What the round consented to is NOT a parameter: see
     /// [`SessionPersister::consented`].
@@ -287,6 +288,12 @@ impl SessionPersister {
         // it would rewrite the decision, which the consumer may already have read.
         if metadata.status == SessionStatus::Completed {
             safe_logger::debug!("persist: the session completed earlier this round");
+            return Err(CallbackError);
+        }
+        // A round still under way at the session's `expires_at` commits nothing:
+        // from then on its consumer reads it as expired.
+        if metadata.expired_at(clock::now()) {
+            safe_logger::debug!("persist: the session expired during the round");
             return Err(CallbackError);
         }
 
@@ -977,7 +984,7 @@ mod tests {
         metadata: &SessionMetadata,
     ) -> (Arc<storage_client::memory::Disk>, Arc<SessionStore>) {
         let disk = Arc::new(storage_client::memory::Disk::default());
-        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32], None));
+        let store = Arc::new(SessionStore::new(disk.connect().await, [4; 32]));
         let set = SetMetadata(
             Storage::expose_builder::<MetadataOp, _>(metadata)
                 .vouch(reason!(Covert::NotChosen, "test fixture")),

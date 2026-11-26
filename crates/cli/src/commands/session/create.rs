@@ -25,6 +25,10 @@ use super::transport;
 use super::{API_URL, APPLICANT_URL};
 use super::{api_measurement, bare_origin, is_group, under_group};
 
+/// How long a session takes its applicant's requests where neither
+/// `--expires-in` nor the spec file says: an hour.
+const DEFAULT_EXPIRES_IN_SECS: u64 = 3600;
+
 /// What `session create` was asked.
 pub struct Asked {
     /// The policy's pinned reference, or `-` for one on stdin.
@@ -34,6 +38,9 @@ pub struct Asked {
     pub props: Option<String>,
     pub disclosure_key: Option<PathBuf>,
     pub consumer_ref: Option<String>,
+    /// How long the session takes its applicant's requests, in seconds from
+    /// now.
+    pub expires_in: Option<u64>,
     pub measurement: Option<String>,
     /// The API's origin.
     pub api: String,
@@ -108,6 +115,12 @@ pub async fn run(asked: Asked) -> Result<()> {
     if let Some(r) = asked.consumer_ref.as_deref() {
         body["consumer_ref"] = serde_json::Value::String(r.to_string());
     }
+    // `--expires-in` from now, else the spec file's own `expires_at`, else an
+    // hour from now.
+    if asked.expires_in.is_some() || body.get("expires_at").is_none() {
+        let secs = asked.expires_in.unwrap_or(DEFAULT_EXPIRES_IN_SECS);
+        body["expires_at"] = now().saturating_add(secs).into();
+    }
 
     // 2. Disclosure recipient. Precedence: --disclosure-key (explicit) >
     //    a `disclosure_pubkey` already in the body (--from-file) >
@@ -149,6 +162,7 @@ pub async fn run(asked: Asked) -> Result<()> {
 
     // 3. POST.
     let url = format!("{api}/api/v1/sessions");
+    let expires_at = body["expires_at"].clone();
 
     let response = transport::send(
         &client,
@@ -219,6 +233,7 @@ pub async fn run(asked: Asked) -> Result<()> {
     if let Some(group) = group.as_deref() {
         println!("  group:            {group}");
     }
+    println!("  expires_at:       {expires_at}");
     println!("  applicant URL:    {applicant_link}");
     println!();
     println!("  Cached:");
@@ -243,6 +258,14 @@ pub async fn run(asked: Asked) -> Result<()> {
     println!("  enclavid session disclosures {}", created.session_id);
 
     Ok(())
+}
+
+/// Now, in unix seconds.
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The policy `value` names: itself, or for `-` the one line on stdin, as

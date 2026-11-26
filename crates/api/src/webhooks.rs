@@ -1,11 +1,13 @@
 //! Webhooks: a consumer told that its session ended.
 //!
-//! A session that ends — its policy gave a decision, or it could not be prepared
-//! to run — and whose consumer gave a webhook gets a notice, added by the same
-//! write that ends it ([`notice`]). [`Webhooks`] takes each notice once it is
-//! due, reads the session it is about, and sends the webhook through the hatch,
-//! one attempt at a time: a `2xx` settles the notice, anything else makes it due
-//! at the next step of its schedule, and a notice past the last step is dropped.
+//! A session whose consumer gave a webhook gets a notice at its creation, due at
+//! its `expires_at` ([`timer`]). A write that ends the session before then — its
+//! policy gave a decision, or it could not be prepared to run — puts a notice
+//! due at once in its place ([`notice`]). [`Webhooks`] takes each notice once it
+//! is due, reads the session it is about, and sends the webhook through the
+//! hatch, one attempt at a time: a `2xx` settles the notice, anything else makes
+//! it due at the next step of its schedule, and a notice past the last step is
+//! dropped.
 //!
 //! Notices are taken as they come due: when a write here adds one, when an
 //! attempt ends, and when the store says the next one is. Each then waits for
@@ -20,7 +22,7 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use base64ct::{Base64, Encoding};
 use hmac::{Hmac, Mac};
@@ -29,7 +31,7 @@ use sha2::{Digest, Sha256};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
-use enclavid_boundary::{AuthN, AuthZ, Covert, Replay, reason};
+use enclavid_boundary::{AuthN, AuthZ, Covert, ExposedBuilder, Replay, reason};
 use hatch_client::{DEFAULT_WEBHOOK_DEADLINE, Link, WebhookClient, WebhookRequest};
 use session_types::{SessionMetadata, SessionStatus, Webhook};
 use storage_client::boundary::Storage;
@@ -41,6 +43,7 @@ use storage_rpc::MAX_NOTICE_HOLD_SECS;
 use storage_rpc::MAX_NOTICES_TAKEN;
 
 use crate::boundary::Hatch;
+use crate::clock;
 use crate::compositions::principal;
 use crate::semaphores::Semaphores;
 
@@ -138,16 +141,9 @@ struct NoticeBody {
     sealed_session_id: String,
 }
 
-fn now_unix() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 /// The unix time `at` on this side's clock: now, where it has passed.
 fn instant(at: u64) -> Instant {
-    Instant::now() + Duration::from_secs(at.saturating_sub(now_unix()))
+    Instant::now() + Duration::from_secs(at.saturating_sub(clock::now()))
 }
 
 /// `body` as a notice keeps it: its CBOR in [`NOTICE_FRAME`] bytes, zeros after
@@ -161,26 +157,38 @@ fn frame(body: &NoticeBody) -> Result<Vec<u8>, String> {
     Ok(frame)
 }
 
-/// The notice of a session that ends with the write `metadata` goes in: `None`
+/// The value of a notice of `session_id`, first due at `first_due`: `None`
 /// where its consumer asked for no webhook, or where the session id does not
-/// seal to the key it gave — the session then ends as it would without one.
-pub fn notice(session_id: &str, metadata: &SessionMetadata) -> Option<AddNotice> {
+/// seal to the key it gave.
+fn value(
+    session_id: &str,
+    metadata: &SessionMetadata,
+    first_due: u64,
+) -> Option<ExposedBuilder<Vec<u8>, NoticeOp, (AuthN,), Storage>> {
     let consumer = metadata.consumer.as_ref()?;
     let webhook = consumer.webhook.as_ref()?;
     let sealed = enclavid_crypto::seal_to_recipient(session_id.as_bytes(), &webhook.pubkey)
         .inspect_err(|e| safe_logger::debug!("webhooks: sealing the id of {session_id}: {e}"))
         .ok()?;
-    let now = now_unix();
     let body = NoticeBody {
         session_id: session_id.to_owned(),
         consumer: Sha256::digest(principal(consumer)).into(),
-        first_due: now,
+        first_due,
         sealed_session_id: Base64::encode_string(&sealed),
     };
-    let value = Storage::expose_builder::<NoticeOp, _>(&body)
+    Storage::expose_builder::<NoticeOp, _>(&body)
         .vouch_with(Covert::Transformed, frame)
         .inspect_err(|e| safe_logger::debug!("webhooks: the notice of {session_id}: {e}"))
-        .ok()?;
+        .ok()
+}
+
+/// The notice of a session that ends with the write `metadata` goes in, due at
+/// once: `None` where its consumer asked for no webhook, or where the session
+/// id does not seal to the key it gave — the session then ends as it would
+/// without one.
+pub fn notice(session_id: &str, metadata: &SessionMetadata) -> Option<AddNotice> {
+    let now = clock::now();
+    let value = value(session_id, metadata, now)?;
     let due = Storage::expose(NoticeDue(now))
         .vouch(reason!(
             AuthN::Indifferent,
@@ -193,6 +201,30 @@ pub fn notice(session_id: &str, metadata: &SessionMetadata) -> Option<AddNotice>
         .vouch(reason!(
             Covert::AlreadyHeld,
             "the time of the write that ends the session, which the host watches land"
+        ));
+    Some(AddNotice { due, value })
+}
+
+/// The notice a session is created with, due at its `expires_at`: what tells
+/// its consumer that its time ran out, unless a write that ends it first puts
+/// its own notice in this one's place. `None` as for [`notice`].
+pub fn timer(session_id: &str, metadata: &SessionMetadata) -> Option<AddNotice> {
+    let at = metadata.expires_at;
+    let value = value(session_id, metadata, at)?;
+    let due = Storage::expose(NoticeDue(at))
+        .vouch(reason!(
+            AuthN::Indifferent,
+            "when the store hands the notice back, and the session is read as it stands \
+             then: before its expiry it waits, after it the webhook says what is so"
+        ))
+        .vouch(reason!(
+            AuthZ::NoSecret,
+            "the session's expires_at, which the record's deadline beside it shows already"
+        ))
+        .vouch(reason!(
+            Covert::AlreadyHeld,
+            "the consumer's expires_at: the record's deadline is it and the keep the host \
+             sets itself"
         ));
     Some(AddNotice { due, value })
 }
@@ -261,6 +293,18 @@ fn again(schedule: &[u64], first_due: u64, now: u64) -> Settle {
         .map_or(Settle::Done, |due_unix_secs| Settle::Again {
             due_unix_secs,
         })
+}
+
+/// What becomes of a notice taken at `now` while its session runs, before its
+/// `expires_at`: due at the first step of `schedule` past `now`, or at
+/// `expires_at` where that comes first. Never dropped: past the last step it is
+/// due at `expires_at`, when the session has ended one way or the other.
+fn waiting(schedule: &[u64], first_due: u64, expires_at: u64, now: u64) -> Settle {
+    let due_unix_secs = match again(schedule, first_due, now) {
+        Settle::Again { due_unix_secs } => due_unix_secs.min(expires_at),
+        Settle::Done => expires_at,
+    };
+    Settle::Again { due_unix_secs }
 }
 
 /// Sends each notice's webhook as it comes due, through the hatch.
@@ -397,7 +441,7 @@ impl Webhooks {
 
     /// One attempt at the webhook of `notice`, and what becomes of the notice.
     async fn attempt(&self, notice: &NoticeBody) -> Settle {
-        let now = now_unix();
+        let now = clock::now();
         let due_again = || again(&self.settings.schedule, notice.first_due, now);
         let ((metadata,), _version) = match self.store.read(&notice.session_id, (Metadata,)).await {
             Ok(read) => read,
@@ -422,13 +466,23 @@ impl Webhooks {
         let Some(metadata) = metadata else {
             return Settle::Done;
         };
-        // A notice whose write did not land, or one taken before its write did:
-        // it waits for the session to end.
-        if !matches!(
-            metadata.status,
-            SessionStatus::Completed | SessionStatus::InitFailed | SessionStatus::Expired
-        ) {
-            return due_again();
+        match metadata.status {
+            SessionStatus::Completed | SessionStatus::InitFailed => {}
+            // Its time ran out: the webhook says it ended, and its view that it
+            // expired.
+            SessionStatus::Running if metadata.expired_at(now) => {}
+            // A notice whose write did not land, or one taken before its write
+            // did: it waits for the session to end, at the latest at its
+            // `expires_at`.
+            SessionStatus::Running => {
+                return waiting(
+                    &self.settings.schedule,
+                    notice.first_due,
+                    metadata.expires_at,
+                    now,
+                );
+            }
+            SessionStatus::Unspecified => return due_again(),
         }
         let Some(consumer) = metadata.consumer else {
             return Settle::Done;

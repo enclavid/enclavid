@@ -289,7 +289,8 @@ What each measurement-relevant part is doing:
   | | `session-request-buffer` | 16 |
   | | `cache-request-buffer` | 8 |
   | | `db-busy-secs` | 5 |
-  | api | `session-ttl-secs` | 1 week |
+  | api | `session-ttl-secs` | 1 week, how far past its creation a session's `expires_at` may lie |
+  | | `session-keep-secs` | 1 week, how long a session's record is kept past its `expires_at` |
   | | `leg-dial-secs` | 30 |
   | | `leg-retry-max-secs` | 10 |
   | | `pull-deadline-secs` | 60 |

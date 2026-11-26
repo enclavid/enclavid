@@ -6,10 +6,11 @@ use axum::response::Response;
 use axum::routing::{MethodRouter, get};
 use serde::Serialize;
 
-use session_types::{SessionStatus, Terms};
+use session_types::Terms;
 use storage_client::Metadata;
 
-use crate::dto::{self, DecisionView, InitErrorView, ResolvedPolicyView};
+use crate::clock;
+use crate::dto::{self, DecisionView, InitErrorView, ResolvedPolicyView, StatusView};
 
 use super::auth::{Principal, SessionToken, trust_metadata};
 use super::state::ConsumerState;
@@ -17,11 +18,9 @@ use super::state::ConsumerState;
 #[derive(Serialize)]
 pub struct SessionView {
     pub session_id: String,
-    /// Lifecycle label, serialized as snake_case
-    /// (`"running"`, `"completed"`, ...) via the shared
-    /// `dto::SessionStatusDef` remote definition.
-    #[serde(with = "dto::SessionStatusDef")]
-    pub status: SessionStatus,
+    /// Lifecycle label, serialized as snake_case (`"running"`,
+    /// `"completed"`, ...), as the applicant's page reads it too.
+    pub status: StatusView,
     pub policy: ResolvedPolicyView,
     /// The consumer's own reconciliation key, echoed back as supplied at
     /// session create. Skipped when missing so the JSON shape stays
@@ -34,6 +33,12 @@ pub struct SessionView {
     /// Unix seconds at session create time. Surfaced for ops /
     /// observability (age, latency); not a security signal.
     pub created_at: u64,
+    /// When the session stops taking its applicant's requests, in unix
+    /// seconds, as the consumer gave it.
+    pub expires_at: u64,
+    /// When the session's record is dropped, in unix seconds: what it came to
+    /// is read until then.
+    pub kept_until: u64,
     /// The policy's verdict, once the session is completed. The one thing
     /// the consumer learns of a session without the applicant's consent:
     /// four values, fixed by the platform.
@@ -56,23 +61,22 @@ pub struct TermsView {
     pub components_bytes: u64,
     /// The composition compiled, in bytes.
     pub cwasm_bytes: u64,
-    /// How long the session lives from its creation, in seconds; `null` where
-    /// nothing removes it.
-    pub session_ttl_secs: Option<u64>,
+    /// How far past its creation the session's `expires_at` may lie, in
+    /// seconds.
+    pub session_ttl_secs: u64,
     /// How long one pull from a registry may take, in seconds.
     pub pull_deadline_secs: u64,
 }
 
 impl TermsView {
     fn of(terms: &Terms, state: &ConsumerState) -> Self {
-        let ttl = state.session_store.ttl_secs();
         Self {
             components_bytes: Terms::within(
                 terms.components_bytes,
                 engine_rpc::MAX_COMPONENTS_BYTES,
             ),
             cwasm_bytes: Terms::within(terms.cwasm_bytes, engine_rpc::MAX_CWASM_BYTES),
-            session_ttl_secs: terms.session_ttl_secs.or(ttl),
+            session_ttl_secs: Terms::within(terms.session_ttl_secs, state.session_ttl_secs),
             pull_deadline_secs: Terms::within(
                 terms.pull_deadline_secs,
                 state.pull_deadline.as_secs(),
@@ -109,6 +113,7 @@ async fn read(
     // Discharge AuthZ (token + principal) and Replay scopes via the
     // shared helper; returns verified `SessionMetadata`.
     let metadata = trust_metadata(metadata_untrusted, &presented_token, &presented_principal)?;
+    let status = StatusView::of(&metadata, clock::now());
 
     // `metadata.consumer` is `Option<Consumer>` purely because of proto3
     // semantics: sub-messages are always presence-tracked at the
@@ -126,9 +131,6 @@ async fn read(
         );
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
-
-    let status =
-        SessionStatus::try_from(metadata.status).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let digest = crate::policy_pull::split_pinned_ref(&metadata.policy_ref)
         .map(|(_, d)| d.to_string())
@@ -157,6 +159,8 @@ async fn read(
         },
         disclosures: metadata.disclosure_count,
         created_at: metadata.created_at,
+        expires_at: metadata.expires_at,
+        kept_until: metadata.kept_until,
         decision,
         init_error,
         terms,

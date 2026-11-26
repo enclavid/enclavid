@@ -1,13 +1,15 @@
 //! What the host decides about api at launch, outside its measurement
-//! (`fleet_transport::launch`): how long a session lives, how long and how
-//! often api waits on its legs and on the hatch, how many pulls one consumer
-//! may have under way at once, how it holds up its own end of each leg, and
-//! when and how many webhooks it sends.
+//! (`fleet_transport::launch`): how far ahead a consumer may set a session's
+//! `expires_at` and how long its record is kept after, how long and how often
+//! api waits on its legs and on the hatch, how many pulls one consumer may have
+//! under way at once, how it holds up its own end of each leg, and when and how
+//! many webhooks it sends.
 //!
 //! None of them reaches the terms between applicant, consumer and policy, and
 //! none opens anything to the host. The host splices the hatch's leg, so how
 //! long api waits on the hatch was the host's to stall already; a leg is dialed
-//! at the host; and a session's lifetime is swept on the host's clock. The framing
+//! at the host; and a record lies on the host's volume, which it can drop at
+//! any time — while how long a session runs is its consumer's. The framing
 //! that keeps a round's sizes constant on a leg is the contract's, above the
 //! connection these set. A webhook goes out through the host's network, which
 //! can hold it back, and from a store whose notices the host can put back to
@@ -23,16 +25,23 @@ use safe_logger::{reason, safe};
 
 use crate::fleet::Dial;
 
-/// How long a session lives, unless the host says otherwise
-/// (`session-ttl-secs`): an ABSOLUTE TTL, its deadline `created_at + ttl` set
-/// once at create, after which the storage-CVM's sweeper removes the session —
-/// abandoned or completed-and-pulled. A week is a generous window for the
-/// consumer to pull disclosures after completion.
+/// How far past its creation a session's `expires_at` may lie, unless the host
+/// says otherwise (`session-ttl-secs`).
 const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// How long a session's record is kept past its `expires_at`, unless the host
+/// says otherwise (`session-keep-secs`): a week for its consumer to read what
+/// it came to.
+const DEFAULT_SESSION_KEEP_SECS: u64 = 7 * 24 * 60 * 60;
 
 /// api's settings, as the host gave them or as this build defaults them.
 pub struct Settings {
+    /// How far past its creation a session's `expires_at` may lie
+    /// (`session-ttl-secs`): what a session's own terms are held under.
     pub session_ttl_secs: u64,
+    /// How long a session's record is kept past its `expires_at`
+    /// (`session-keep-secs`), the store dropping it then.
+    pub session_keep_secs: u64,
     /// How each fleet leg is dialed: one attempt's bound (`leg-dial-secs`) and
     /// the longest wait between attempts (`leg-retry-max-secs`).
     pub leg_dial: Dial,
@@ -63,8 +72,8 @@ pub struct Settings {
 
 /// The host's settings for api, or no boot: a key api does not know, one given
 /// twice, or a value that is not a number above zero stops it rather than
-/// falling back to a default — a zero TTL would sweep every session as it is
-/// made, and a zero deadline would fail every call it bounds. The leg's port
+/// falling back to a default — a zero TTL would refuse every session, and a
+/// zero deadline would fail every call it bounds. The leg's port
 /// limit and chunk are held to what chmux runs with ([`LegSettings::refusal`]).
 pub fn load() -> Settings {
     let mut launch = Launch::load("api").unwrap_or_else(|e| refused(e));
@@ -72,6 +81,7 @@ pub fn load() -> Settings {
     let webhooks = crate::webhooks::Settings::default();
     let settings = Settings {
         session_ttl_secs: number(&mut launch, "session-ttl-secs", DEFAULT_SESSION_TTL_SECS),
+        session_keep_secs: number(&mut launch, "session-keep-secs", DEFAULT_SESSION_KEEP_SECS),
         leg_dial: Dial {
             within: secs(
                 &mut launch,

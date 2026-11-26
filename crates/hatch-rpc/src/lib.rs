@@ -72,7 +72,8 @@ pub struct SessionTerms {
     pub components_bytes: Option<u64>,
     /// The composition compiled, in bytes.
     pub cwasm_bytes: Option<u64>,
-    /// How long the session lives, in seconds.
+    /// How far past its creation the session's `expires_at` may lie, in
+    /// seconds.
     pub session_ttl_secs: Option<u64>,
     /// How long one pull from a registry may take, in seconds.
     pub pull_deadline_secs: Option<u64>,

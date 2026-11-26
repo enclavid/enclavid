@@ -25,6 +25,7 @@ use enclavid_boundary::{AuthZ, Replay, reason};
 use session_types::SessionStatus;
 use storage_client::Metadata;
 
+use crate::clock;
 use crate::init;
 use crate::state::AppState;
 
@@ -53,7 +54,7 @@ async fn warmup(Path(session_id): Path<String>, State(state): State<Arc<AppState
     else {
         return StatusCode::NOT_FOUND;
     };
-    if metadata.status != SessionStatus::Running {
+    if metadata.status != SessionStatus::Running || metadata.expired_at(clock::now()) {
         return StatusCode::CONFLICT;
     }
     init::warm_in_background(

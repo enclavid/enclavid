@@ -9,6 +9,7 @@ use session_types::SessionStatus;
 use storage_client::boundary::Storage;
 use storage_client::{DropApplicantData, Metadata, MetadataOp, SetMetadata, StoreError};
 
+use crate::clock;
 use crate::state::AppState;
 
 /// Route factory. Public (no auth layer) — see `applicant::router`.
@@ -23,7 +24,8 @@ pub(super) fn delete_state() -> MethodRouter<Arc<AppState>> {
 /// any key — there is no separate in-memory claim to clear. Media and the
 /// disclosure chain go with it, and the disclosure bookkeeping in metadata is
 /// wound back to match — all in one write, under the version this read the
-/// session at. 409 when the session is completed, or moved under the reset.
+/// session at. 409 when the session is completed or expired, or moved under the
+/// reset.
 ///
 /// No auth: the legitimate applicant who lost their key cannot prove ownership
 /// cryptographically (state is encrypted with the lost key). Knowledge of
@@ -89,8 +91,9 @@ async fn reset(
     // not touch (`consumer::disclosures` serves `Completed` and nothing else).
     // Every other state has served nobody, which is what makes deleting the
     // chain below a deletion of data rather than a retraction of data someone
-    // already holds.
-    if metadata.status == SessionStatus::Completed {
+    // already holds. An expired one runs no round again, so nobody claims it
+    // anew.
+    if metadata.status == SessionStatus::Completed || metadata.expired_at(clock::now()) {
         return Err(StatusCode::CONFLICT);
     }
 
