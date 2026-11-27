@@ -26,11 +26,9 @@ for unit in $(systemctl list-units --all --plain --no-legend 'enclavid-*' | awk 
   systemctl reset-failed "$unit"
 done
 
-# The certificate runs. Only its own gateway's push wants a run, so the
-# activation starts one along with a push it starts, and not one new to this
-# switch beside a push already up — as when issuance is first turned on; and one
-# that failed before this switch is to try again now. A run in progress, or
-# waiting a quarter of an hour to run again, is left to it.
+# The certificate runs, which nothing the activation starts wants: each one is
+# started here, after the gateways' pushes. A run in progress, or waiting half
+# an hour to run again, is left to it.
 mapfile -t certificates < <(systemctl list-unit-files --no-legend 'enclavid-certificate*.service' | awk '{print $1}')
 for unit in "${certificates[@]}"; do
   case "$(systemctl show -p ActiveState --value "$unit")" in

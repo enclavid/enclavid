@@ -219,16 +219,17 @@ gateway's serving key. The names are validated over TLS-ALPN-01, on the port
 callers already reach, and the gateway answers the validator itself — so
 nothing else has to be open, and no DNS credential is needed.
 
-It checks the certificate after every start of the gateway, at every switch
-and every six hours, and has it issued again when it lapses
+It checks the certificate at every switch and every six hours, and has it
+issued again when it lapses
 within `renewDays` or the authority asks for it early, when a new gateway build
 holds a new key, when the names changed, or when it came from another
 directory than `server` — a staging run's is kept no longer than the switch
-away from staging. A run that fails is tried again a quarter of an hour later —
-except one the authority refused to validate, on CAA say, which waits for the
-next check: refusals in a row get the account paused for the names (Let's
-Encrypt pauses after about a thousand, and its error links to where to lift
-it). A switch says which run failed, and fails nothing for it. Issued chains
+away from staging. A run that fails is tried again half an hour later, one the
+authority refused to validate too — on CAA, say, until the record that allows
+the gateway's account is in. Two refusals an hour are far from the thousand in
+a row after which Let's Encrypt pauses the account for the names (its error
+links to where to lift it). A switch says which run failed, and fails nothing
+for it. Issued chains
 are kept in `/var/lib/enclavid/certificates`, one per gateway key and named by
 it, and a push carries the ones for the key the gateway serves on. Nothing of
 the account is kept on the host.
@@ -283,7 +284,8 @@ quote binds.
   on CAA until its record is added beside the old one — meanwhile the gateway
   serves on its own certificate, which browsers refuse — so keep the records'
   TTL short, plan a switch to a new gateway build around the record, and run
-  staging before any record is in place. Once the record is in,
+  staging before any record is in place. Once the record is in, the next run
+  has the certificate issued — within half an hour, or at once with
   `sudo systemctl restart enclavid-certificate-main`; remove the old one when
   the old build is gone.
 - A new gateway build can have all of that done before it serves anyone. The
@@ -294,9 +296,11 @@ quote binds.
   run arms every gateway on the host — the one listening at `public.listen`
   without fail — and each answers the validator for any account, so a new
   build on another port opens its account and has its certificate issued
-  through the one callers reach, and can be tried on its own port. Switching
-  is giving it `public.listen`. A gateway holds one answer for a name, so the
-  runs on one host validate one at a time.
+  through the one callers reach, and can be tried on its own port. One built
+  for another table schema refuses the table it is pushed, and has its
+  certificate issued all the same. Switching is giving it `public.listen`. A
+  gateway holds one answer for a name, so the runs on one host validate one at
+  a time.
 - Put the records on the names, not on the zone apex, unless nothing else under
   it is issued certificates another way.
 - Point the names at whatever is in front of the gateway with A/AAAA records,

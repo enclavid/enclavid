@@ -304,17 +304,17 @@ let
         };
       };
     } // lib.optionalAttrs issue.enable {
-      # After every push — so after every start of the gateway, whose keys a
-      # new build changes — at every switch, which starts it, and every six
-      # hours, by its timer. A run that fails is tried again a quarter of an
-      # hour later, unless the issuer refused to validate the names: refusals
-      # in a row get the account paused for them, so one waits for the next
-      # check, or a restart by hand. Nothing of the account is kept here: its
-      # key is the gateway's, and the issuer finds the account by it on every
-      # run.
+      # At every switch, which starts it, and every six hours, by its timer;
+      # not at a push, which a gateway refusing its table is given again every
+      # few seconds. A restarted gateway keeps its keys, and its push carries
+      # the certificate for them. A run that fails is tried again half an hour
+      # later, a refusal to validate the names too (on CAA, until the record
+      # naming the account is in): two refusals an hour, far from the thousand
+      # in a row that get the account paused. Nothing of the account is kept
+      # here: its key is the gateway's, and the issuer finds the account by it
+      # on every run.
       "enclavid-certificate-${g.name}" = {
         description = "Enclavid: keep the gateway ${g.name} on an issued certificate";
-        wantedBy = [ "${unit}-push.service" ];
         # After every gateway's push, not only its own: the one callers reach
         # opens its public listener at its first push.
         after = map (o: "enclavid-gateway-${o.name}-push.service") gateways;
@@ -327,8 +327,7 @@ let
             [ (lib.getExe certificate) "--for" port ] ++ arming ++ [ "--push" gatewayJson ]
           );
           Restart = "on-failure";
-          RestartSec = "15min";
-          RestartPreventExitStatus = 3;
+          RestartSec = "30min";
           StateDirectory = "enclavid/certificates";
           StateDirectoryMode = "0700";
           TimeoutStartSec = 600;

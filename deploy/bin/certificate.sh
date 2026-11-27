@@ -23,8 +23,7 @@
 # gateway finds its own there whenever it comes to serve on that key.
 #
 # It exits 3 when the issuer refused to validate the names — on CAA, say — and
-# 1 for anything else: the unit tries the others again soon, and a refusal
-# only at its next check, since refusals in a row get the account paused.
+# 1 for anything else.
 fail() {
   echo "$*" >&2
   exit 1
