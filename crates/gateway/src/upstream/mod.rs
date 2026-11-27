@@ -47,9 +47,9 @@
 //! delegation, and it is what lets api be upgraded without rebuilding this role.
 //!
 //! So neither is read from a path beyond the marker a link carries. The rest
-//! of it is matched against the name's rules, which say whether a request may
-//! name its group or must, never which group it goes to — see
-//! `crate::route::Rules`.
+//! of it is matched against the name's rules, which list the groups a request
+//! naming its group may reach and the groups one naming none is placed on —
+//! see `crate::route::Rules`.
 //!
 //! ## The host says where, and never what
 //!
@@ -85,6 +85,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use balance::Members;
+
+use crate::config::Groups;
 
 /// A set of api instances on one key domain, reading one store, and so
 /// interchangeable.
@@ -264,13 +266,13 @@ pub struct Target<'a> {
 pub enum NoRoute {
     /// No measurement was named where one is required.
     Unspecified,
-    /// The request names its group where a rule says this role places it, or
-    /// names none where a rule says it must — see `crate::route::Rules`.
+    /// The request names a group its rule does not let it reach, or names none
+    /// where its rule places nothing — see `crate::route::Rules`.
     AgainstRule,
-    /// The build named is one the rule placing this request refuses — see
-    /// `crate::config::Route::refuse_measurements`. About the build, never a
-    /// group: every group running it is closed alike, and nothing here names
-    /// the build that replaced it, which is the caller's to choose.
+    /// The build named runs here, but in no group the rule placing this
+    /// request places on — see `crate::config::Alternative::LoadBalance`. About
+    /// the build, never a group: nothing here names the build that replaced
+    /// it, which is the caller's to choose.
     Refused,
     /// A build was named and no group declares it; or a label was named and no
     /// group carries it; or the name this connection settled is not served. One
@@ -411,22 +413,38 @@ impl Upstreams {
         })
     }
 
-    /// Where a NEW session goes: a group running the build the caller named.
+    /// Where a NEW session goes: one of `among` running the build the caller
+    /// named. A build that runs here, but in none of them, takes no new
+    /// session here: [`NoRoute::Refused`].
     ///
-    /// Chosen at random among the groups that run it, which spreads sessions as
-    /// well as a turn would and gives the host nothing to aim with. A turn is
-    /// predictable — it restarts with every push — so a host that pushed a
-    /// label sorting first could have the next new session placed on it for
-    /// certain, and follow that session by it; chance gives it no such hold.
-    pub fn place(&self, name: &str, measurement: &str) -> Result<Target<'_>, NoRoute> {
-        let candidates: Vec<&String> = self
+    /// Chosen at random among those, which spreads sessions as well as a turn
+    /// would and gives the host nothing to aim with. A turn is predictable — it
+    /// restarts with every push — so a host that pushed a label sorting first
+    /// could have the next new session placed on it for certain, and follow
+    /// that session by it; chance gives it no such hold. So would the load a
+    /// group is under: the host carries every leg, and by slowing the others it
+    /// could make the group it chose the least loaded without a push.
+    pub fn place(
+        &self,
+        name: &str,
+        measurement: &str,
+        among: &Groups,
+    ) -> Result<Target<'_>, NoRoute> {
+        let running: Vec<&String> = self
             .groups
             .iter()
             .filter(|(_, group)| group.proof.measurement == measurement)
             .map(|(label, _)| label)
             .collect();
-        if candidates.is_empty() {
+        if running.is_empty() {
             return Err(NoRoute::NoSuchGroup);
+        }
+        let candidates: Vec<&String> = running
+            .into_iter()
+            .filter(|label| among.contains(label))
+            .collect();
+        if candidates.is_empty() {
+            return Err(NoRoute::Refused);
         }
 
         let turn = random_below(candidates.len());
@@ -704,14 +722,36 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn a_new_session_is_placed_on_a_group_running_that_build() {
         let up = table().await;
-        let placed = up.place(SECOND, B).ok().unwrap();
+        let placed = up.place(SECOND, B, &Groups::Every).ok().unwrap();
         assert_eq!(placed.group, "two");
         assert_eq!(placed.members.addresses(), set(&[3001]));
 
         assert!(
-            up.place(SECOND, &"c".repeat(96)).is_err(),
+            matches!(
+                up.place(SECOND, &"c".repeat(96), &Groups::Every),
+                Err(NoRoute::NoSuchGroup)
+            ),
             "a build nobody runs is nowhere to place"
         );
+    }
+
+    /// Placed only on the groups listed: a build that runs here, in none of
+    /// them, takes no new session here.
+    #[tokio::test]
+    async fn a_new_session_is_placed_only_on_a_group_listed() {
+        let up = table().await;
+        let listed =
+            |labels: &[&str]| Groups::Listed(labels.iter().map(|l| l.to_string()).collect());
+        let placed = up.place(SECOND, B, &listed(&["one", "two"])).ok().unwrap();
+        assert_eq!(placed.group, "two");
+        assert!(matches!(
+            up.place(SECOND, B, &listed(&["one"])),
+            Err(NoRoute::Refused)
+        ));
+        assert!(matches!(
+            up.place(SECOND, B, &listed(&[])),
+            Err(NoRoute::Refused)
+        ));
     }
 
     /// Two groups can run one build — that is how a build is rolled out or how
@@ -738,7 +778,13 @@ pub(crate) mod tests {
         // one in 2^63.
         let mut seen: Vec<String> = Vec::new();
         for _ in 0..64 {
-            seen.push(up.place(SECOND, A).ok().unwrap().group.to_owned());
+            seen.push(
+                up.place(SECOND, A, &Groups::Every)
+                    .ok()
+                    .unwrap()
+                    .group
+                    .to_owned(),
+            );
         }
         seen.sort();
         seen.dedup();
@@ -750,7 +796,14 @@ pub(crate) mod tests {
         let mut first: Vec<String> = Vec::new();
         for _ in 0..64 {
             let fresh = Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body));
-            first.push(fresh.place(SECOND, A).ok().unwrap().group.to_owned());
+            first.push(
+                fresh
+                    .place(SECOND, A, &Groups::Every)
+                    .ok()
+                    .unwrap()
+                    .group
+                    .to_owned(),
+            );
         }
         first.sort();
         first.dedup();
@@ -769,7 +822,7 @@ pub(crate) mod tests {
         let up = Upstreams::empty(crate::identity::attestor());
         assert_eq!(up.len(), 0);
         assert!(up.at_group(FIRST, "one").is_err());
-        assert!(up.place(SECOND, A).is_err());
+        assert!(up.place(SECOND, A, &Groups::Every).is_err());
     }
 
     /// A push declaring one group under one name, running `build`, with members

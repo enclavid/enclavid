@@ -63,8 +63,8 @@ let
         unprivileged = true;
       };
     in
-    lib.optionalAttrs (cfg.hatch.authorize != "none") { authorize-hook = hook 8005 cfg.hatch.authorize; }
-    // lib.optionalAttrs (cfg.hatch.limits != null) { limits-hook = hook 8006 cfg.hatch.limits; };
+    lib.optionalAttrs (r.authorize != "none") { authorize-hook = hook 8005 r.authorize; }
+    // lib.optionalAttrs (r.limits != null) { limits-hook = hook 8006 r.limits; };
   # How the gateways here reach a release's api: straight into its guest on
   # this host, or to its entrances wherever they are. One relay each, which
   # every gateway dials.
@@ -189,14 +189,15 @@ let
   ];
 
   # The gateway's table: a group per release, running that release's api and
-  # reached under both names. A request that creates a session is placed by
-  # the gateway — never on a draining release's build — and every other names
-  # the group its link carries. A browser at the bare verify name, which has
-  # no link, is sent to `public.landing` if it is set — off the verify origin,
-  # which every release's pages share.
+  # reached under both names. A request that creates a session names a
+  # release that is `nameable`, or is placed by the gateway among those that
+  # are `placed` — a draining release is neither — and every other names the
+  # group its link carries.
+  open = lib.filter (r: !r.draining) releases;
+  labels = rs: map (r: r.name) rs;
   named = [
-    { path = "/"; group = "required"; }
-    { path = "/{*rest}"; group = "required"; }
+    { path = "/"; groups = [{ match = "*"; }]; }
+    { path = "/{*rest}"; groups = [{ match = "*"; }]; }
   ];
   table = {
     groups = lib.listToAttrs (map (r: lib.nameValuePair r.name { measurement = ""; }) releases);
@@ -208,25 +209,17 @@ let
       ${cfg.names.api} = [{
         method = "POST";
         path = "/api/v1/sessions";
-        group = "forbidden";
-        refuse_measurements = [ ];
+        groups =
+          lib.optional (lib.any (r: r.nameable) open) { match = labels (lib.filter (r: r.nameable) open); }
+          ++ [{ load_balance = labels (lib.filter (r: r.placed) open); }];
       }] ++ named;
-      ${cfg.names.verify} = lib.optional (cfg.public.landing != null) {
-        method = "GET";
-        path = "/";
-        external_origin_redirect_307_to = cfg.public.landing;
-      } ++ named;
+      ${cfg.names.verify} = named;
     };
   };
   # A measurement is a build output, so it is filled in by a build rather than
   # read here.
   measured = r: "m${toString r.index}";
-  fill = lib.concatStringsSep " | " (
-    map (r: ".groups[${builtins.toJSON r.name}].measurement = \$${measured r}") releases
-    ++ [ ".routes[][] |= (if has(\"refuse_measurements\") then .refuse_measurements = [${
-      lib.concatMapStringsSep ", " (r: "\$${measured r}") (lib.filter (r: r.draining) releases)
-    }] else . end)" ]
-  );
+  fill = lib.concatMapStringsSep " | " (r: ".groups[${builtins.toJSON r.name}].measurement = \$${measured r}") releases;
   gatewayJson = pkgs.runCommand "enclavid-gateway.json" { nativeBuildInputs = [ pkgs.jq ]; } ''
     jq ${lib.concatMapStringsSep " " (r: "--rawfile ${measured r} ${r.built.measurement "api"}") releases} \
       ${lib.escapeShellArg (if releases == [ ] then "." else fill)} \
@@ -237,15 +230,6 @@ let
     # group's legs are refused and its share of new sessions fails.
     jq -e '[.groups[].measurement] | group_by(.) | all(length <= 8)' $out >/dev/null || {
       echo "enclavid.releases: more than 8 run one api build, and the gateway takes at most 8 groups of a build on one host" >&2
-      exit 1
-    }
-    # New sessions are refused by build, so a build draining in one release
-    # would be refused in every other that runs it too.
-    jq -e --argjson open ${lib.escapeShellArg (builtins.toJSON (map (r: r.name) (lib.filter (r: !r.draining) releases)))} '
-      [.routes[][] | .refuse_measurements? // [] | .[]] as $refused
-      | [.groups | to_entries[] | select(.key as $k | $open | index($k)) | .value.measurement]
-      | all(. as $m | $refused | index($m) | not)' $out >/dev/null || {
-      echo "enclavid.releases: a build draining in one release runs undrained in another, and new sessions are refused by build — drain all of them or none" >&2
       exit 1
     }
   '';
@@ -469,17 +453,6 @@ in
           its own — and then make sure nothing else reaches the relay.
         '';
       };
-      landing = mkOption {
-        type = types.nullOr types.str;
-        default = null;
-        example = "https://example.com/from-verify";
-        description = ''
-          Where a browser at the bare verify name, with no link to a session, is
-          sent: an https page under a name the gateway does not serve, which it
-          refuses to send one to. Null answers it 400, as any request naming no
-          group.
-        '';
-      };
     };
     acme.issue = {
       enable = lib.mkEnableOption ''
@@ -553,7 +526,34 @@ in
           draining = mkOption {
             type = types.bool;
             default = false;
-            description = "Whether the gateway refuses its build new sessions, while its links still route.";
+            description = "Whether it takes no new session — the gateway places none on it, and a creation may not name it — while its links still route.";
+          };
+          placed = mkOption {
+            type = types.bool;
+            default = true;
+            description = "Whether the gateway places on it the new sessions that name no release.";
+          };
+          nameable = mkOption {
+            type = types.bool;
+            default = false;
+            description = "Whether a creation may name it, as a link names a release, to have its session there.";
+          };
+          authorize = mkOption {
+            type = types.either (types.enum [ "none" ]) hookAddress;
+            default = cfg.hatch.authorize;
+            defaultText = lib.literalExpression "config.enclavid.hatch.authorize";
+            description = ''
+              Who may create a session on it, as `hatch.authorize` says for the
+              host: its hatch asks this hook, so a release whose hook takes only
+              some consumers refuses the rest, whichever release a creation
+              names.
+            '';
+          };
+          limits = mkOption {
+            type = types.nullOr hookAddress;
+            default = cfg.hatch.limits;
+            defaultText = lib.literalExpression "config.enclavid.hatch.limits";
+            description = "The hook that gives each principal's limits on it, as `hatch.limits` says for the host.";
           };
           guests = mkOption {
             type = types.bool;

@@ -1220,8 +1220,9 @@ mod tests {
             &format!(
                 r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
                 "routes": {{ "{SECOND}": [
-                  {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden" }},
-                  {{ "path": "/api/v1/sessions/{{*rest}}", "group": "required" }} ] }},"#
+                  {{ "method": "POST", "path": "/api/v1/sessions",
+                     "groups": [ {{ "load_balance": "*" }} ] }},
+                  {{ "path": "/api/v1/sessions/{{*rest}}", "groups": [ {{ "match": "*" }} ] }} ] }},"#
             ),
         );
         assert_ne!(ruled, table(&api, A));
@@ -1288,21 +1289,21 @@ mod tests {
         assert_eq!(elsewhere.status(), StatusCode::OK);
     }
 
-    /// A page load naming nothing is sent off this origin, a link to the same
-    /// path reaches its group, and neither a worker's script nor this role's
-    /// own space under a link is passed on to it — over a real connection, as
+    /// A page load naming nothing goes nowhere, a link to the same path
+    /// reaches its group, and neither a worker's script nor this role's own
+    /// space under a link is passed on to it — over a real connection, as
     /// pushed.
     #[tokio::test]
-    async fn a_bare_page_load_is_sent_away_and_no_worker_is_fetched() {
+    async fn a_bare_page_load_goes_nowhere_and_no_worker_is_fetched() {
         let api = api().await;
         let (at, _, pushes) = gateway(&api).await;
-        let away = "https://elsewhere.example.org/from-verify";
         let ruled = table(&api, A).replace(
             &format!(r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},"#),
             &format!(
                 r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
                 "routes": {{ "{SECOND}": [
-                  {{ "method": "GET", "path": "/", "external_origin_redirect_307_to": "{away}" }} ] }},"#
+                  {{ "path": "/", "groups": [ {{ "match": "*" }} ] }},
+                  {{ "path": "/{{*rest}}", "groups": [ {{ "match": "*" }} ] }} ] }},"#
             ),
         );
         assert_ne!(ruled, table(&api, A));
@@ -1318,11 +1319,7 @@ mod tests {
         };
 
         let bare = ask(&mut second, get("/", None)).await;
-        assert_eq!(bare.status(), StatusCode::TEMPORARY_REDIRECT);
-        assert_eq!(
-            bare.headers()[hyper::header::LOCATION],
-            format!("{away}#").as_str()
-        );
+        assert_eq!(bare.status(), StatusCode::BAD_REQUEST);
         assert!(
             !bare.headers().contains_key("x-asked-for"),
             "forwarded nowhere"
@@ -1351,22 +1348,23 @@ mod tests {
         assert!(!under_a_link.headers().contains_key("x-asked-for"));
     }
 
-    /// A build closed to new sessions is gone for them — said so, and not to be
-    /// cached — while its links still answer, across the push that closed it; a
-    /// later push reopens it.
+    /// A build whose group is left out of the groups new sessions are placed
+    /// on is gone for them — said so, and not to be cached — while its links
+    /// still answer, across the push that closed it; a later push listing the
+    /// group again reopens it.
     #[tokio::test]
     async fn a_closed_build_is_gone_for_new_sessions_over_a_connection() {
         let api = api().await;
         let (at, _, pushes) = gateway(&api).await;
-        let ruled = |refused: &str| {
+        let ruled = |placed: &str| {
             table(&api, A).replace(
                 &format!(r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},"#),
                 &format!(
                     r#""{SECOND}":  {{ "{GROUP}": ["{api}"] }} }},
                     "routes": {{ "{SECOND}": [
-                      {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden",
-                         "refuse_measurements": [{refused}] }},
-                      {{ "path": "/api/v1/sessions/{{*rest}}", "group": "required" }} ] }},"#
+                      {{ "method": "POST", "path": "/api/v1/sessions",
+                         "groups": [ {{ "load_balance": [{placed}] }} ] }},
+                      {{ "path": "/api/v1/sessions/{{*rest}}", "groups": [ {{ "match": "*" }} ] }} ] }},"#
                 ),
             )
         };
@@ -1381,7 +1379,7 @@ mod tests {
                 .unwrap()
         };
 
-        push(ruled(&format!(r#""{A}""#)));
+        push(ruled(""));
         let mut second = caller(&at, SECOND, 4 << 20).await;
         let gone = ask(&mut second, create()).await;
         assert_eq!(gone.status(), StatusCode::GONE);
@@ -1400,7 +1398,7 @@ mod tests {
         .await;
         assert_eq!(link.status(), StatusCode::OK, "its sessions finish");
 
-        push(ruled(""));
+        push(ruled(&format!(r#""{GROUP}""#)));
         let reopened = ask(&mut second, create()).await;
         assert_eq!(reopened.status(), StatusCode::OK);
         assert!(reopened.headers().contains_key(GROUP_HEADER));

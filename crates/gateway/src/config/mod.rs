@@ -55,10 +55,9 @@
 //! groups: one -> the build it runs
 //! names:  verify.example.com -> one -> the addresses of its members there
 //!         api.example.com    -> one -> the addresses of its members there
-//! routes: api.example.com    -> POST /api/v1/sessions      -> group forbidden,
-//!                                                             refusing the builds it closes
-//!                            -> /api/v1/sessions/{*rest}   -> group required
-//!         verify.example.com -> GET /                      -> sent to a page elsewhere
+//! routes: api.example.com    -> POST /api/v1/sessions      -> placed on the groups it lists
+//!                            -> /api/v1/sessions/{*rest}   -> names its group, any of them
+//!         verify.example.com -> /{*rest}                   -> names its group, any of them
 //! certificates: chains an issuer signed for this role's key, if any
 //! ```
 //!
@@ -74,19 +73,17 @@
 //! configuration port, beside the push.
 //!
 //! The routes are what a name's requests are held to, by method and path, as a
-//! reverse proxy's locations are: where a request may name its group and where
-//! it must. Which of api's requests create a session is api's business, and
-//! only the host can say it without this role holding a copy of api's routes —
-//! see `crate::route::Rules`. A path is written as api writes its own routes,
-//! so the host can copy them. Like everything else here, they say where a
-//! request may go, never whether what it reaches is checked.
+//! reverse proxy's locations are: which groups a request naming its group may
+//! reach, and which groups one naming none is placed on. Which of api's
+//! requests create a session is api's business, and only the host can say it
+//! without this role holding a copy of api's routes — see
+//! `crate::route::Rules`. A path is written as api writes its own routes, so
+//! the host can copy them. Like everything else here, they say where a request
+//! may go, never whether what it reaches is checked.
 //!
-//! A rule that places may also refuse builds: a release being retired takes no
-//! new session, and a caller that names it is told it is gone, while the
-//! sessions it holds finish through their links — see
-//! `crate::config::Route::refuse_measurements`. A page load that names nothing
-//! may be sent to a page on another origin, never one of this role's — see
-//! `crate::config::Route::external_origin_redirect_307_to`.
+//! A release being retired is left out of the groups new sessions are placed
+//! on: a caller that names its build is told it is gone, while the sessions it
+//! holds finish through their links — see `crate::config::Alternative`.
 //!
 //! ## The type is the grammar
 //!
@@ -119,6 +116,6 @@ mod table;
 pub(crate) mod testing;
 
 pub use table::{
-    ListenerTuning, MOST_DESCRIPTORS, Naming, OWN_DESCRIPTORS, Route, Tuning, UpstreamTuning,
-    ValidatedConfig,
+    Alternative, Groups, ListenerTuning, MOST_DESCRIPTORS, OWN_DESCRIPTORS, Route, Tuning,
+    UpstreamTuning, ValidatedConfig,
 };

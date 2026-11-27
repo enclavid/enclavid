@@ -33,12 +33,9 @@
 //! and a build marked in the path, or — without one — a build the caller names,
 //! against which this role places it and says where, in [`GROUP_HEADER`].
 //! Nothing here knows what kind of caller it is serving; a caller either knows
-//! its group or is given one, and then names it from there on.
-//!
-//! A browser typed at the bare name has neither, and reads no header. Where a
-//! rule says so, it is sent to a page on another origin — never into a group,
-//! whose build the host would then have chosen for it; see
-//! [`Route::external_origin_redirect_307_to`].
+//! its group or is given one, and then names it from there on. One that names
+//! neither — a browser typed at the bare name — goes nowhere: placing it would
+//! have the host choose its build for it.
 //!
 //! Whichever way a request arrives, the build it carries is compared to what
 //! its label runs NOW, so the caller's one choice binds every later request
@@ -48,17 +45,19 @@
 //! upload would go there with it. That the state is sealed to the build that
 //! made it protects the state, not the data still in flight.
 //!
-//! ## Where a request may name its group, and where it must
+//! ## Which groups a request may name, and which it is placed on
 //!
 //! Which of the two a request may use is api's business: only api knows which
 //! requests create a session and which are about one. So it is the host's to
 //! say, per name, in the push — see [`Rules`] — and not this file's, which would
-//! otherwise hold a copy of api's routes in a measured image. A request that
-//! creates a session is marked to be placed, so a caller cannot pile every
-//! session into the group it prefers; a request about one is marked to name its
-//! group, so one that forgot is refused rather than placed where its session is
-//! not. A push that says nothing leaves both to the caller: what a rule governs
-//! is balance, never what a leg proves.
+//! otherwise hold a copy of api's routes in a measured image. A rule lists the
+//! groups a request naming its group may reach, and the groups one naming none
+//! is placed on. A request that creates a session is placed, so a caller cannot
+//! pile every session into the group it prefers — unless the rule lists a
+//! group it may name, as one taking only the sessions created for it; a
+//! request about one names its group, so one that forgot is refused rather than
+//! placed where its session is not. A push that says nothing leaves both to the
+//! caller: what a rule governs is balance, never what a leg proves.
 //!
 //! The name the handshake settled decides only WHICH ADDRESSES of that group to
 //! use, because one api process listens on more than one port. It is read from
@@ -80,10 +79,9 @@
 //! ## What reaches api, and what stops here
 //!
 //! The marker a link carries is stripped on the way through. The rest of the
-//! path is matched against the name's [`Rules`], which say whether the request
-//! may name its group, which builds take no new session there, and where one
-//! naming nothing is sent instead, and goes on to api as it came; the query is
-//! not read at all. The target goes on as `https://` and the name
+//! path is matched against the name's [`Rules`], which say which groups the
+//! request may reach, and goes on to api as it came; the query is not read at
+//! all. The target goes on as `https://` and the name
 //! the connection agreed to, and the caller's own `Host` stops here, since the
 //! handshake's name is the one routed by. A request that names a different
 //! host than that one is not routed at all: it is refused with 421, as a
@@ -119,7 +117,7 @@ use matchit::{InsertError, Router};
 use safe_logger::debug;
 use tokio::sync::watch;
 
-use crate::config::{Naming, Route};
+use crate::config::{Alternative, Groups, Route};
 use crate::identity::{account, attest};
 use crate::upstream::member::Sent;
 use crate::upstream::{NoRoute, Upstreams};
@@ -205,9 +203,8 @@ impl Hop {
         }
 
         let mut req = req;
-        let (target, placed) = match route(&table, &name, &mut req) {
-            Ok(Routed::Forward(target, placed)) => (target, placed),
-            Ok(Routed::Away(location)) => return sent_away(&location),
+        let Routed { target, placed } = match route(&table, &name, &mut req) {
+            Ok(routed) => routed,
             // 400, because the request is missing something only the caller can
             // supply, or carries what a rule says it may not. Naming a build is
             // not a formality here — it is the whole of what this role checks on
@@ -443,27 +440,6 @@ fn redirected(location: &str) -> Response<ResponseBody> {
     redirect(StatusCode::PERMANENT_REDIRECT, location)
 }
 
-/// A temporary redirect to `location`, a page on another origin a rule names —
-/// see [`Route::external_origin_redirect_307_to`].
-///
-/// Temporary and not to be stored: the page is the rule's as of this push, and
-/// a later one may name another, while a redirect kept in a cache would go on
-/// sending a browser there. No referrer, so the other site is told nothing of
-/// where the browser came from.
-fn sent_away(location: &str) -> Response<ResponseBody> {
-    let mut response = redirect(StatusCode::TEMPORARY_REDIRECT, location);
-    let headers = response.headers_mut();
-    headers.insert(
-        hyper::header::CACHE_CONTROL,
-        hyper::header::HeaderValue::from_static("no-store"),
-    );
-    headers.insert(
-        hyper::header::REFERRER_POLICY,
-        hyper::header::HeaderValue::from_static("no-referrer"),
-    );
-    response
-}
-
 /// A redirect to `location` with `status`, and no body.
 fn redirect(status: StatusCode, location: &str) -> Response<ResponseBody> {
     let Ok(location) = hyper::header::HeaderValue::from_str(location) else {
@@ -515,25 +491,24 @@ fn refuse(status: StatusCode) -> Response<ResponseBody> {
     response
 }
 
-/// Where [`route`] sends a request.
-enum Routed<'a> {
-    /// On to a group — `true` beside it when this role did the choosing: that
-    /// caller is told where it went, and a caller that already knew its group
-    /// needs nothing said to it.
-    Forward(crate::upstream::Target<'a>, bool),
-    /// Off this origin, to this page — see
-    /// [`Route::external_origin_redirect_307_to`].
-    Away(String),
+/// Where [`route`] sends a request: on to a group, and whether this role did
+/// the choosing — that caller is told where it went, and a caller that already
+/// knew its group needs nothing said to it.
+struct Routed<'a> {
+    target: crate::upstream::Target<'a>,
+    placed: bool,
 }
+
+/// Every group: what a path no rule holds may reach either way.
+static EVERY: Groups = Groups::Every;
 
 /// The one rule: where this request goes, and whether this role chose it.
 ///
 /// Two inputs. A label and a build marked in the path are what a link carries,
 /// and a browser can send nothing else on a navigation. Without one, the caller
 /// must name the build it requires, and this role chooses among the groups
-/// running it — or, where a rule sends a request naming nothing to a page
-/// elsewhere, sends it there. Which the request may use is what the name's
-/// rules say about its method and path — see [`Rules`].
+/// running it. Which groups the request may reach is what the name's rules say
+/// about its method and path — see [`Rules`].
 fn route<'a, B>(
     table: &'a Upstreams,
     name: &str,
@@ -541,10 +516,9 @@ fn route<'a, B>(
 ) -> Result<Routed<'a>, NoRoute> {
     // Taken off the request FIRST, before any branch below can return — every
     // branch that forwards the request would carry it, and it names a choice
-    // this hop makes that api has no use for. Whether the build was named at
-    // all, and more than once, is noted before the header goes, because it
-    // cannot be told after.
-    let named_at_all = req.headers().contains_key(MEASUREMENT);
+    // this hop makes that api has no use for. Whether the build was named more
+    // than once is noted before the header goes, because it cannot be told
+    // after.
     let named_twice = req.headers().get_all(MEASUREMENT).iter().nth(1).is_some();
     let named = req
         .headers_mut()
@@ -566,30 +540,14 @@ fn route<'a, B>(
     }
 
     // The name's rules, for the path as api will see it — the marker is out of
-    // it by now.
+    // it by now. Where none holds the path, either way to any group.
     let terms = table
         .rules(name)
         .and_then(|rules| rules.terms(req.method(), req.uri().path()));
-    let naming = terms.and_then(|terms| terms.naming);
-    if marked.is_some() && naming == Some(Naming::Forbidden) {
-        return Err(NoRoute::AgainstRule);
-    }
-    if marked.is_none() && naming == Some(Naming::Required) {
-        return Err(NoRoute::AgainstRule);
-    }
-    // Named nothing, not even a build — one named in a form that cannot be
-    // read is still named, and refused below: sent away if the rule says so.
-    // The page is the rule's alone — nothing of this request goes into it, the
-    // query included — and it carries a fragment, empty, so that the one this
-    // request was made from does not travel on with it: a browser keeps a
-    // fragment across a redirect whose target has none, and a link that lost
-    // its marker would take its session id to another site.
-    if marked.is_none()
-        && !named_at_all
-        && let Some(away) = terms.and_then(|terms| terms.away.as_deref())
-    {
-        return Ok(Routed::Away(format!("{away}#")));
-    }
+    let (named_groups, placed_groups) = match terms {
+        Some(terms) => (terms.named.as_ref(), terms.placed.as_ref()),
+        None => (Some(&EVERY), Some(&EVERY)),
+    };
 
     if let Some(marked) = marked {
         // A build named in a header as well must be the same one, for the same
@@ -604,17 +562,25 @@ fn route<'a, B>(
         if target.measurement != marked.build {
             return Err(NoRoute::NoSuchGroup);
         }
-        return Ok(Routed::Forward(target, false));
+        // Only then whether the rule lets the request name it: which labels a
+        // rule lists is told only to a caller holding the build they run.
+        if !named_groups.is_some_and(|groups| groups.contains(&marked.label)) {
+            return Err(NoRoute::AgainstRule);
+        }
+        return Ok(Routed {
+            target,
+            placed: false,
+        });
     }
 
+    let placed_groups = placed_groups.ok_or(NoRoute::AgainstRule)?;
+    // Named in a form that cannot be read is not named.
     let wanted = named.ok_or(NoRoute::Unspecified)?;
-    // A build that takes no new sessions. The ones it holds carry their group
-    // in their links, so they came in by the branch above and never reach this.
-    if terms.is_some_and(|terms| terms.refused.contains(&wanted)) {
-        return Err(NoRoute::Refused);
-    }
-    let target = table.place(name, &wanted)?;
-    Ok(Routed::Forward(target, true))
+    let target = table.place(name, &wanted, placed_groups)?;
+    Ok(Routed {
+        target,
+        placed: true,
+    })
 }
 
 /// What one name's requests are held to, by method and path, as the push
@@ -641,14 +607,40 @@ pub struct Rules {
     otherwise: Router<Terms>,
 }
 
-/// What the rule matching a request holds it to: whether it must name its
-/// group, the builds it places no new session on, and the page one naming
-/// nothing is sent to.
+/// What the rule matching a request holds it to: the groups a request naming
+/// its group may reach, and the groups one naming none is placed on — `None`
+/// where no alternative takes such a request.
 #[derive(Clone)]
 struct Terms {
-    naming: Option<Naming>,
-    refused: Vec<String>,
-    away: Option<String>,
+    named: Option<Groups>,
+    placed: Option<Groups>,
+}
+
+impl Terms {
+    /// The terms of `alternatives`: every `match` together, and the one
+    /// `load_balance` — the push has refused a rule with two.
+    fn of(alternatives: &[Alternative]) -> Terms {
+        let mut terms = Terms {
+            named: None,
+            placed: None,
+        };
+        for alternative in alternatives {
+            match alternative {
+                Alternative::Match(groups) => {
+                    terms.named = Some(match (terms.named.take(), groups) {
+                        (None, groups) => groups.clone(),
+                        (Some(Groups::Every), _) | (_, Groups::Every) => Groups::Every,
+                        (Some(Groups::Listed(mut held)), Groups::Listed(more)) => {
+                            held.extend(more.iter().cloned());
+                            Groups::Listed(held)
+                        }
+                    });
+                }
+                Alternative::LoadBalance(groups) => terms.placed = Some(groups.clone()),
+            }
+        }
+        terms
+    }
 }
 
 /// Rules as the push lists them: each beside its place in the list, for a
@@ -713,11 +705,13 @@ impl Rules {
             .map(|matched| matched.value)
     }
 
-    /// Whether a group must be named, alone, for the tests that are about
-    /// nothing else.
+    /// The groups the rule matching `method` and `path` lets a request name,
+    /// and the ones it places on, alone, for the tests that are about nothing
+    /// else.
     #[cfg(test)]
-    fn naming(&self, method: &Method, path: &str) -> Option<Naming> {
-        self.terms(method, path).and_then(|terms| terms.naming)
+    fn groups(&self, method: &Method, path: &str) -> Option<(Option<Groups>, Option<Groups>)> {
+        self.terms(method, path)
+            .map(|terms| (terms.named.clone(), terms.placed.clone()))
     }
 }
 
@@ -758,14 +752,7 @@ fn held(router: &mut Router<Terms>, i: usize, route: &Route) -> Result<(), Strin
         return Err(format!("[{i}].path: at most {MOST_OPEN} {{name}}s"));
     }
     router
-        .insert(
-            route.path.as_str(),
-            Terms {
-                naming: route.group,
-                refused: route.refuse_measurements.clone(),
-                away: route.external_origin_redirect_307_to.clone(),
-            },
-        )
+        .insert(route.path.as_str(), Terms::of(&route.groups))
         .map_err(|e| {
             let why = match e {
                 InsertError::Conflict { with } => format!(
@@ -943,8 +930,9 @@ mod tests {
               "groups": {{ "one": {{ "measurement": "{A}" }}, "two": {{ "measurement": "{A}" }} }},
               "names": {{ "{FIRST}": {{ "one": ["{}"], "two": ["{}"] }} }},
               "routes": {{ "{FIRST}": [
-                {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden" }},
-                {{ "path": "/api/v1/sessions/{{*rest}}", "group": "required" }} ] }},
+                {{ "method": "POST", "path": "/api/v1/sessions",
+                   "groups": [ {{ "load_balance": "*" }} ] }},
+                {{ "path": "/api/v1/sessions/{{*rest}}", "groups": [ {{ "match": "*" }} ] }} ] }},
               {TUNING} }}"#,
             at(1000),
             at(2000),
@@ -973,7 +961,7 @@ mod tests {
             FIRST,
             &mut asking(Method::POST, "/api/v1/sessions", Some(A)),
         );
-        assert!(matches!(placed, Ok(Routed::Forward(_, true))));
+        assert!(matches!(placed, Ok(Routed { placed: true, .. })));
 
         let named = route(
             &table,
@@ -1001,8 +989,14 @@ mod tests {
                 FIRST,
                 &mut asking(Method::GET, &format!("/-two.{A}/api/v1/sessions/1"), None),
             );
-            assert!(matches!(named, Ok(Routed::Forward(target, false)) if target.group == "two"));
+            assert!(went(&named, "two", false));
         }
+    }
+
+    /// Whether `routed` went on to the group `label`, chosen by this role or
+    /// not as `placed` says.
+    fn went(routed: &Result<Routed<'_>, NoRoute>, label: &str, placed: bool) -> bool {
+        matches!(routed, Ok(r) if r.target.group == label && r.placed == placed)
     }
 
     /// Where no rule speaks, both are the caller's: placed by the build it
@@ -1015,26 +1009,149 @@ mod tests {
             FIRST,
             &mut asking(Method::GET, "/elsewhere", Some(A)),
         );
-        assert!(matches!(placed, Ok(Routed::Forward(_, true))));
+        assert!(matches!(placed, Ok(Routed { placed: true, .. })));
         let named = route(
             &table,
             FIRST,
             &mut asking(Method::GET, &format!("/-one.{A}/elsewhere"), None),
         );
-        assert!(matches!(named, Ok(Routed::Forward(target, false)) if target.group == "one"));
+        assert!(went(&named, "one", false));
     }
 
-    /// One group running a build that takes no new sessions, beside one running
-    /// the build that replaced it.
+    /// A request naming neither its group nor a build — a page load at the bare
+    /// name — goes nowhere, and neither does one naming a build in a form that
+    /// cannot be read.
+    #[test]
+    fn a_request_naming_nothing_goes_nowhere() {
+        let table = two_groups_on_one_build();
+        let bare = route(&table, FIRST, &mut asking(Method::GET, "/elsewhere", None));
+        assert!(matches!(bare, Err(NoRoute::Unspecified)));
+
+        let mut unreadable = asking(Method::POST, "/api/v1/sessions", None);
+        unreadable.headers_mut().insert(
+            MEASUREMENT,
+            hyper::header::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        let unreadable = route(&table, FIRST, &mut unreadable);
+        assert!(matches!(unreadable, Err(NoRoute::Unspecified)));
+    }
+
+    /// Two groups on one build, under a rule that lets a creation name `own`
+    /// and places the rest on `shared` — a group that takes only the sessions
+    /// created for it.
+    fn one_group_named_one_placed() -> Upstreams {
+        let body = format!(
+            r#"{{
+              "groups": {{ "own": {{ "measurement": "{A}" }}, "shared": {{ "measurement": "{A}" }} }},
+              "names": {{ "{FIRST}": {{ "own": ["{}"], "shared": ["{}"] }} }},
+              "routes": {{ "{FIRST}": [
+                {{ "method": "POST", "path": "/api/v1/sessions",
+                   "groups": [ {{ "match": ["own"] }}, {{ "load_balance": ["shared"] }} ] }},
+                {{ "path": "/api/v1/sessions/{{*rest}}", "groups": [ {{ "match": "*" }} ] }} ] }},
+              {TUNING} }}"#,
+            at(1000),
+            at(2000),
+        );
+        Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body))
+    }
+
+    /// A creation naming the group its rule lets it name goes there, and one
+    /// naming none is placed only among the rest; naming another is refused.
+    #[test]
+    fn a_creation_names_only_a_group_its_rule_lists() {
+        let table = one_group_named_one_placed();
+        for _ in 0..32 {
+            let placed = route(
+                &table,
+                FIRST,
+                &mut asking(Method::POST, "/api/v1/sessions", Some(A)),
+            );
+            assert!(went(&placed, "shared", true));
+        }
+        let own = route(
+            &table,
+            FIRST,
+            &mut asking(Method::POST, &format!("/-own.{A}/api/v1/sessions"), None),
+        );
+        assert!(went(&own, "own", false));
+        let shared = route(
+            &table,
+            FIRST,
+            &mut asking(Method::POST, &format!("/-shared.{A}/api/v1/sessions"), None),
+        );
+        assert!(matches!(shared, Err(NoRoute::AgainstRule)));
+
+        // Under the rule beside it, both groups' sessions are reached.
+        for label in ["own", "shared"] {
+            let link = route(
+                &table,
+                FIRST,
+                &mut asking(
+                    Method::GET,
+                    &format!("/-{label}.{A}/api/v1/sessions/1"),
+                    None,
+                ),
+            );
+            assert!(went(&link, label, false), "{label}");
+        }
+    }
+
+    /// Without the build a label runs, a creation naming it is answered as one
+    /// naming a label that is gone, listed or not: which labels a rule lists is
+    /// not told to a caller that names no build they run.
+    #[test]
+    fn which_labels_a_rule_lists_needs_their_build() {
+        let table = one_group_named_one_placed();
+        for label in ["own", "shared", "gone"] {
+            let guessed = route(
+                &table,
+                FIRST,
+                &mut asking(
+                    Method::POST,
+                    &format!("/-{label}.{B}/api/v1/sessions"),
+                    None,
+                ),
+            );
+            assert!(matches!(guessed, Err(NoRoute::NoSuchGroup)), "{label}");
+        }
+    }
+
+    /// A build that runs only where nothing is placed takes no new session
+    /// placed: gone, as a drained build is.
+    #[test]
+    fn a_build_running_only_where_nothing_is_placed_is_gone() {
+        let body = format!(
+            r#"{{
+              "groups": {{ "own": {{ "measurement": "{B}" }}, "shared": {{ "measurement": "{A}" }} }},
+              "names": {{ "{FIRST}": {{ "own": ["{}"], "shared": ["{}"] }} }},
+              "routes": {{ "{FIRST}": [
+                {{ "method": "POST", "path": "/api/v1/sessions",
+                   "groups": [ {{ "match": ["own"] }}, {{ "load_balance": ["shared"] }} ] }} ] }},
+              {TUNING} }}"#,
+            at(1000),
+            at(2000),
+        );
+        let table = Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body));
+        let placed = route(
+            &table,
+            FIRST,
+            &mut asking(Method::POST, "/api/v1/sessions", Some(B)),
+        );
+        assert!(matches!(placed, Err(NoRoute::Refused)));
+    }
+
+    /// One group running a build that takes no new sessions — left out of the
+    /// groups a creation is placed on — beside one running the build that
+    /// replaced it.
     fn a_build_closed_beside_a_new_one() -> Upstreams {
         let body = format!(
             r#"{{
               "groups": {{ "old": {{ "measurement": "{A}" }}, "new": {{ "measurement": "{B}" }} }},
               "names": {{ "{FIRST}": {{ "old": ["{}"], "new": ["{}"] }} }},
               "routes": {{ "{FIRST}": [
-                {{ "method": "POST", "path": "/api/v1/sessions", "group": "forbidden",
-                   "refuse_measurements": ["{A}"] }},
-                {{ "path": "/api/v1/sessions/{{*rest}}", "group": "required" }} ] }},
+                {{ "method": "POST", "path": "/api/v1/sessions",
+                   "groups": [ {{ "load_balance": ["new"] }} ] }},
+                {{ "path": "/api/v1/sessions/{{*rest}}", "groups": [ {{ "match": "*" }} ] }} ] }},
               {TUNING} }}"#,
             at(1000),
             at(2000),
@@ -1058,7 +1175,7 @@ mod tests {
             FIRST,
             &mut asking(Method::POST, "/api/v1/sessions", Some(B)),
         );
-        assert!(matches!(open, Ok(Routed::Forward(target, true)) if target.group == "new"));
+        assert!(went(&open, "new", true));
 
         for _ in 0..16 {
             let link = route(
@@ -1066,7 +1183,7 @@ mod tests {
                 FIRST,
                 &mut asking(Method::GET, &format!("/-old.{A}/api/v1/sessions/1"), None),
             );
-            assert!(matches!(link, Ok(Routed::Forward(target, false)) if target.group == "old"));
+            assert!(went(&link, "old", false));
         }
         let marked = route(
             &table,
@@ -1075,7 +1192,7 @@ mod tests {
         );
         assert!(
             matches!(marked, Err(NoRoute::AgainstRule)),
-            "a marker is refused before the list is read"
+            "a creation names no group here"
         );
     }
 
@@ -1104,147 +1221,74 @@ mod tests {
             FIRST,
             &mut asking(Method::GET, "/elsewhere", Some(A)),
         );
-        assert!(matches!(placed, Ok(Routed::Forward(target, true)) if target.group == "old"));
+        assert!(went(&placed, "old", true));
     }
 
-    /// The builds a rule refuses go with the rule that holds the request: the
-    /// most specific, and for a HEAD the GET's.
+    /// The groups a rule places on go with the rule that holds the request:
+    /// the most specific, and for a HEAD the GET's.
     #[test]
-    fn a_rule_s_refused_builds_follow_the_most_specific_rule() {
-        let refusing = |method: Option<&str>, path: &str| Route {
-            refuse_measurements: vec![A.to_owned()],
-            ..rule(method, path, Naming::Forbidden)
-        };
+    fn a_rule_s_groups_follow_the_most_specific_rule() {
+        let only = |label: &str| Groups::Listed(vec![label.to_owned()]);
         let rules = Rules::new(&[
-            refusing(Some("POST"), "/a/{*rest}"),
-            rule(Some("POST"), "/a/b", Naming::Forbidden),
-            refusing(Some("GET"), "/c"),
+            rule(
+                Some("POST"),
+                "/a/{*rest}",
+                vec![Alternative::LoadBalance(only("x"))],
+            ),
+            rule(
+                Some("POST"),
+                "/a/b",
+                vec![Alternative::LoadBalance(Groups::Every)],
+            ),
+            rule(Some("GET"), "/c", vec![Alternative::LoadBalance(only("y"))]),
         ])
         .unwrap();
-        let refused = |method: Method, path| {
-            rules
-                .terms(&method, path)
-                .map(|terms| terms.refused.clone())
-        };
-        assert_eq!(refused(Method::POST, "/a/x"), Some(vec![A.to_owned()]));
-        assert_eq!(refused(Method::POST, "/a/b"), Some(vec![]));
-        assert_eq!(refused(Method::HEAD, "/c"), Some(vec![A.to_owned()]));
+        let placed = |method: Method, path| rules.groups(&method, path).and_then(|(_, p)| p);
+        assert_eq!(placed(Method::POST, "/a/x"), Some(only("x")));
+        assert_eq!(placed(Method::POST, "/a/b"), Some(Groups::Every));
+        assert_eq!(placed(Method::HEAD, "/c"), Some(only("y")));
     }
 
-    /// Where the bare name sends a page load that names nothing.
-    const ELSEWHERE: &str = "https://elsewhere.example.org/from-verify";
-
-    /// The bare name, where a page load that names nothing is sent to
-    /// [`ELSEWHERE`]: two groups on two builds, and every other request to the
-    /// name naming its group.
-    fn page_loads_sent_elsewhere() -> Upstreams {
-        let body = format!(
-            r#"{{
-              "groups": {{ "old": {{ "measurement": "{A}" }}, "new": {{ "measurement": "{B}" }} }},
-              "names": {{ "{FIRST}": {{ "old": ["{}"], "new": ["{}"] }} }},
-              "routes": {{ "{FIRST}": [
-                {{ "method": "GET", "path": "/", "external_origin_redirect_307_to": "{ELSEWHERE}" }},
-                {{ "path": "/", "group": "required" }},
-                {{ "path": "/{{*rest}}", "group": "required" }} ] }},
-              {TUNING} }}"#,
-            at(1000),
-            at(2000),
-        );
-        Upstreams::empty(crate::identity::attestor()).replaced(&pushed(&body))
-    }
-
-    /// Where `req` is sent away to, if it is.
-    fn sent_to(table: &Upstreams, mut req: Request<()>) -> Option<String> {
-        match route(table, FIRST, &mut req) {
-            Ok(Routed::Away(location)) => Some(location),
-            _ => None,
-        }
-    }
-
-    /// A page load naming nothing is sent to the rule's page, and only to it:
-    /// nothing of the request goes with it, its query included, and it carries
-    /// a fragment of its own, so none the browser holds travels on. A `HEAD`
-    /// is sent as its `GET` is.
+    /// The groups a request may name are every `match` of its rule together,
+    /// every group where one says so; the groups it is placed on are its
+    /// `load_balance`; and a kind no alternative names is none.
     #[test]
-    fn a_page_load_naming_nothing_is_sent_to_the_page_alone() {
-        let table = page_loads_sent_elsewhere();
-        let there = format!("{ELSEWHERE}#");
-        for path in ["/", "/?session=1"] {
-            assert_eq!(
-                sent_to(&table, asking(Method::GET, path, None)).as_deref(),
-                Some(there.as_str()),
-                "{path}"
-            );
-        }
+    fn a_rule_s_alternatives_add_up() {
+        let listed =
+            |labels: &[&str]| Groups::Listed(labels.iter().map(|l| l.to_string()).collect());
+        let rules = Rules::new(&[
+            rule(
+                None,
+                "/a",
+                vec![
+                    Alternative::Match(listed(&["x"])),
+                    Alternative::Match(listed(&["y"])),
+                    Alternative::LoadBalance(listed(&["z"])),
+                ],
+            ),
+            rule(
+                None,
+                "/b",
+                vec![
+                    Alternative::Match(listed(&["x"])),
+                    Alternative::Match(Groups::Every),
+                ],
+            ),
+            rule(None, "/c", vec![Alternative::LoadBalance(listed(&[]))]),
+        ])
+        .unwrap();
         assert_eq!(
-            sent_to(&table, asking(Method::HEAD, "/", None)),
-            Some(there)
+            rules.groups(&Method::GET, "/a"),
+            Some((Some(listed(&["x", "y"])), Some(listed(&["z"]))))
         );
-    }
-
-    /// A link is routed by its marker, to whichever group it names, and a
-    /// caller naming a build is placed by it: the rule sends only what names
-    /// nothing at all.
-    #[test]
-    fn what_names_a_group_or_a_build_is_not_sent_away() {
-        let table = page_loads_sent_elsewhere();
-        for (label, build) in [("new", B), ("old", A)] {
-            let linked = route(
-                &table,
-                FIRST,
-                &mut asking(Method::GET, &format!("/-{label}.{build}/"), None),
-            );
-            assert!(
-                matches!(linked, Ok(Routed::Forward(target, false)) if target.group == label),
-                "{label}"
-            );
-        }
-        let named = route(&table, FIRST, &mut asking(Method::GET, "/", Some(B)));
-        assert!(matches!(named, Ok(Routed::Forward(target, true)) if target.group == "new"));
-
-        // A build named in a form that cannot be read is named all the same,
-        // and refused as it is anywhere a build must be named.
-        let mut unreadable = asking(Method::GET, "/", None);
-        unreadable.headers_mut().insert(
-            MEASUREMENT,
-            hyper::header::HeaderValue::from_bytes(b"\xff").unwrap(),
-        );
-        let unreadable = route(&table, FIRST, &mut unreadable);
-        assert!(matches!(unreadable, Err(NoRoute::Unspecified)));
-    }
-
-    /// Only the page load the rule names is sent: another method on the same
-    /// path, and a page load on another, are held to the rules beside it.
-    #[test]
-    fn only_the_page_load_the_rule_names_is_sent() {
-        let table = page_loads_sent_elsewhere();
-        let posted = route(&table, FIRST, &mut asking(Method::POST, "/", None));
-        assert!(matches!(posted, Err(NoRoute::AgainstRule)));
-        let elsewhere = route(
-            &table,
-            FIRST,
-            &mut asking(Method::GET, "/assets/x.js", None),
-        );
-        assert!(matches!(elsewhere, Err(NoRoute::AgainstRule)));
-    }
-
-    /// The page goes out as a temporary redirect nothing may keep, telling the
-    /// other site nothing of where it came from, with no body.
-    #[test]
-    fn the_page_goes_out_as_a_redirect_nothing_keeps() {
-        let location = format!("{ELSEWHERE}#");
-        let response = sent_away(&location);
-        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
         assert_eq!(
-            response.headers()[hyper::header::LOCATION],
-            location.as_str()
+            rules.groups(&Method::GET, "/b"),
+            Some((Some(Groups::Every), None))
         );
-        assert_eq!(response.headers()[hyper::header::CACHE_CONTROL], "no-store");
         assert_eq!(
-            response.headers()[hyper::header::REFERRER_POLICY],
-            "no-referrer"
+            rules.groups(&Method::GET, "/c"),
+            Some((None, Some(listed(&[]))))
         );
-        assert!(hyper::body::Body::is_end_stream(response.body()));
     }
 
     /// This role's own space reaches no group: under a link's marker, spelled
@@ -1294,60 +1338,83 @@ mod tests {
         assert!(!fetched(&[("sec-fetch-dest", "worker")]));
     }
 
-    /// A rule for the tests: `naming` on requests to `path`, made with `method`
-    /// if one is named.
-    fn rule(method: Option<&str>, path: &str, naming: Naming) -> Route {
+    /// A rule for the tests: `groups` for requests to `path`, made with
+    /// `method` if one is named.
+    fn rule(method: Option<&str>, path: &str, groups: Vec<Alternative>) -> Route {
         Route {
             method: method.map(str::to_owned),
             path: path.to_owned(),
-            group: Some(naming),
-            refuse_measurements: Vec::new(),
-            external_origin_redirect_307_to: None,
+            groups,
         }
+    }
+
+    /// Which of the two kinds of rule the tests below write a request is held
+    /// to.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Kind {
+        /// It names its group, any of them.
+        Named,
+        /// It is placed on any group.
+        Placed,
+    }
+
+    impl Kind {
+        fn groups(self) -> Vec<Alternative> {
+            vec![match self {
+                Kind::Named => Alternative::Match(Groups::Every),
+                Kind::Placed => Alternative::LoadBalance(Groups::Every),
+            }]
+        }
+    }
+
+    /// A rule of `kind`, for the tests about which rule holds a request.
+    fn kind(method: Option<&str>, path: &str, kind: Kind) -> Route {
+        rule(method, path, kind.groups())
+    }
+
+    /// The kind of the rule `rules` hold a request to, if any.
+    fn held_as(rules: &Rules, method: &Method, path: &str) -> Option<Kind> {
+        rules.groups(method, path).map(|groups| match groups {
+            (Some(_), None) => Kind::Named,
+            (None, Some(_)) => Kind::Placed,
+            other => panic!("not a rule the tests write: {other:?}"),
+        })
     }
 
     /// The most specific rule decides: a segment spelled out over one left
     /// open, and among rules with one path, the one naming its method.
     #[test]
     fn the_most_specific_rule_decides() {
-        use Naming::{Forbidden, Required};
+        use Kind::{Named, Placed};
         let rules = Rules::new(&[
-            rule(None, "/a/{*rest}", Required),
-            rule(None, "/a/b/{*rest}", Forbidden),
-            rule(None, "/a/b/c", Required),
-            rule(None, "/u/{id}", Required),
-            rule(None, "/u/me", Forbidden),
-            rule(Some("POST"), "/a/{*rest}", Forbidden),
+            kind(None, "/a/{*rest}", Named),
+            kind(None, "/a/b/{*rest}", Placed),
+            kind(None, "/a/b/c", Named),
+            kind(None, "/u/{id}", Named),
+            kind(None, "/u/me", Placed),
+            kind(Some("POST"), "/a/{*rest}", Placed),
         ])
         .unwrap();
-        let get = |path| rules.naming(&Method::GET, path);
-        assert_eq!(get("/a/x"), Some(Required), "the path left open");
-        assert_eq!(
-            get("/a/b/x"),
-            Some(Forbidden),
-            "one more segment spelled out"
-        );
-        assert_eq!(get("/a/b/c"), Some(Required), "every segment spelled out");
-        assert_eq!(get("/u/7"), Some(Required), "a segment left open");
-        assert_eq!(
-            get("/u/me"),
-            Some(Forbidden),
-            "the same segment spelled out"
-        );
+        let get = |path| held_as(&rules, &Method::GET, path);
+        assert_eq!(get("/a/x"), Some(Named), "the path left open");
+        assert_eq!(get("/a/b/x"), Some(Placed), "one more segment spelled out");
+        assert_eq!(get("/a/b/c"), Some(Named), "every segment spelled out");
+        assert_eq!(get("/u/7"), Some(Named), "a segment left open");
+        assert_eq!(get("/u/me"), Some(Placed), "the same segment spelled out");
         assert_eq!(get("/u/7/x"), None, "one segment is not two");
         assert_eq!(get("/a"), None, "what follows is not nothing");
         assert_eq!(get("/b"), None, "no rule");
 
-        let post = |path| rules.naming(&Method::POST, path);
-        assert_eq!(post("/a/x"), Some(Forbidden), "the rule naming the method");
+        let post = |path| held_as(&rules, &Method::POST, path);
+        assert_eq!(post("/a/x"), Some(Placed), "the rule naming the method");
         assert_eq!(
             post("/a/b/c"),
-            Some(Required),
+            Some(Named),
             "a more specific path over the method"
         );
         assert_eq!(
             post("/u/7"),
-            Some(Required),
+            Some(Named),
             "the rules naming none still hold"
         );
     }
@@ -1356,53 +1423,42 @@ mod tests {
     /// naming none on a broader path.
     #[test]
     fn a_rule_for_another_method_hides_nothing() {
-        use Naming::{Forbidden, Required};
+        use Kind::{Named, Placed};
         let rules = Rules::new(&[
-            rule(None, "/a/{*rest}", Required),
-            rule(Some("POST"), "/a/b", Forbidden),
+            kind(None, "/a/{*rest}", Named),
+            kind(Some("POST"), "/a/b", Placed),
         ])
         .unwrap();
-        assert_eq!(rules.naming(&Method::GET, "/a/b"), Some(Required));
-        assert_eq!(rules.naming(&Method::POST, "/a/b"), Some(Forbidden));
-        assert_eq!(rules.naming(&Method::DELETE, "/a/b"), Some(Required));
+        assert_eq!(held_as(&rules, &Method::GET, "/a/b"), Some(Named));
+        assert_eq!(held_as(&rules, &Method::POST, "/a/b"), Some(Placed));
+        assert_eq!(held_as(&rules, &Method::DELETE, "/a/b"), Some(Named));
     }
 
     /// A `HEAD` is held to the rules for `GET`, unless a rule names it.
     #[test]
     fn a_head_is_held_as_a_get() {
-        use Naming::{Forbidden, Required};
-        let only_get = Rules::new(&[rule(Some("GET"), "/a", Required)]).unwrap();
-        assert_eq!(only_get.naming(&Method::HEAD, "/a"), Some(Required));
+        use Kind::{Named, Placed};
+        let only_get = Rules::new(&[kind(Some("GET"), "/a", Named)]).unwrap();
+        assert_eq!(held_as(&only_get, &Method::HEAD, "/a"), Some(Named));
 
         let rules = Rules::new(&[
-            rule(Some("GET"), "/a", Required),
-            rule(Some("GET"), "/b", Required),
-            rule(Some("HEAD"), "/b", Forbidden),
-            rule(Some("GET"), "/c", Required),
-            rule(None, "/c", Forbidden),
-            rule(None, "/d", Forbidden),
+            kind(Some("GET"), "/a", Named),
+            kind(Some("GET"), "/b", Named),
+            kind(Some("HEAD"), "/b", Placed),
+            kind(Some("GET"), "/c", Named),
+            kind(None, "/c", Placed),
+            kind(None, "/d", Placed),
         ])
         .unwrap();
+        let head = |path| held_as(&rules, &Method::HEAD, path);
+        assert_eq!(head("/b"), Some(Placed), "its own rule");
         assert_eq!(
-            rules.naming(&Method::HEAD, "/b"),
-            Some(Forbidden),
-            "its own rule"
-        );
-        assert_eq!(
-            rules.naming(&Method::HEAD, "/a"),
-            Some(Required),
+            head("/a"),
+            Some(Named),
             "a rule for HEAD elsewhere leaves GET's here"
         );
-        assert_eq!(
-            rules.naming(&Method::HEAD, "/c"),
-            Some(Required),
-            "GET's over one naming none"
-        );
-        assert_eq!(
-            rules.naming(&Method::HEAD, "/d"),
-            Some(Forbidden),
-            "one naming none"
-        );
+        assert_eq!(head("/c"), Some(Named), "GET's over one naming none");
+        assert_eq!(head("/d"), Some(Placed), "one naming none");
     }
 
     /// Two rules a request could not choose between are refused, whichever
@@ -1410,47 +1466,47 @@ mod tests {
     #[test]
     fn rules_a_request_could_not_choose_between_are_refused() {
         let refused = |routes: &[Route]| Rules::new(routes).err().expect("refused");
-        let naming = Naming::Required;
+        let named = Kind::Named;
         for (routes, says) in [
             (
-                vec![rule(None, "/x", naming), rule(None, "/x", naming)],
+                vec![kind(None, "/x", named), kind(None, "/x", named)],
                 "[1].path: overlaps /x",
             ),
             (
-                vec![rule(None, "/x/{a}", naming), rule(None, "/x/{b}", naming)],
+                vec![kind(None, "/x/{a}", named), kind(None, "/x/{b}", named)],
                 "[1].path: overlaps /x/{a}",
             ),
             (
                 vec![
-                    rule(None, "/x/{id}", naming),
-                    rule(None, "/x/{*rest}", naming),
+                    kind(None, "/x/{id}", named),
+                    kind(None, "/x/{*rest}", named),
                 ],
                 "[1].path: overlaps /x/{id}",
             ),
             (
                 vec![
-                    rule(Some("POST"), "/x", naming),
-                    rule(Some("POST"), "/x", naming),
+                    kind(Some("POST"), "/x", named),
+                    kind(Some("POST"), "/x", named),
                 ],
                 "[1].path: overlaps /x",
             ),
             (
                 vec![
-                    rule(Some("POST"), "/q/{a}", naming),
-                    rule(None, "/q/{b}", naming),
+                    kind(Some("POST"), "/q/{a}", named),
+                    kind(None, "/q/{b}", named),
                 ],
                 "[1].path: overlaps /q/{a}",
             ),
             (
-                vec![rule(None, "/x/{bad", naming)],
+                vec![kind(None, "/x/{bad", named)],
                 "[0].path: a {name} is closed",
             ),
             (
-                vec![rule(None, "/x/{a}-b", naming)],
+                vec![kind(None, "/x/{a}-b", named)],
                 "[0].path: one {name} to a segment",
             ),
             (
-                vec![rule(None, "/x/{*a}/b", naming)],
+                vec![kind(None, "/x/{*a}/b", named)],
                 "[0].path: a {*name} ends",
             ),
         ] {
@@ -1460,6 +1516,6 @@ mod tests {
 
         // One path under a method and under none is not a clash: the method's
         // stands in for the other where it applies.
-        Rules::new(&[rule(Some("POST"), "/x", naming), rule(None, "/x", naming)]).unwrap();
+        Rules::new(&[kind(Some("POST"), "/x", named), kind(None, "/x", named)]).unwrap();
     }
 }
